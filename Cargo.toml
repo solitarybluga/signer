@@ -1,0 +1,28 @@
+[package]
+name = "signer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1"
+serde = "1"
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "postgres",
+    "sqlite",
+    "uuid",
+    "time",
+    "json",
+    "migrate",
+    "macros",
+] }
+thiserror = "2"
+time = "0.3"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -1,0 +1,235 @@
+syntax = "proto3";
+
+package signer.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Signing service: manages keys, produces signatures, and coordinates quorum unsealing.
+//
+// Error conventions:
+//   UNAUTHENTICATED / PERMISSION_DENIED — caller is not authenticated or may not access this key
+//   INVALID_ARGUMENT                  — invalid argument (e.g. wrong digest length, mismatched curve/algorithm)
+//   NOT_FOUND                         — key or session does not exist
+//   ALREADY_EXISTS                    — public key already imported for this curve/algorithm
+//   FAILED_PRECONDITION               — service is sealed, or key is not active
+//   RESOURCE_EXHAUSTED                — rate limit or session concurrency limit reached
+//   INTERNAL                          — internal crypto/storage error (no sensitive details returned)
+service SignerService {
+  // Create a key: generate a private key and a per-key DEK, then wrap the DEK with the KEK.
+  rpc CreateKey(CreateKeyRequest) returns (CreateKeyResponse);
+
+  // Import an existing private key (e.g. one that controls on-chain assets).
+  // The service must be unsealed. The private key must be sent over mTLS;
+  // the signer encrypts it immediately and wipes the plaintext. Request bodies are never logged.
+  rpc ImportKey(ImportKeyRequest) returns (ImportKeyResponse);
+
+  // Return the public key for a key ID.
+  rpc GetPublicKey(GetPublicKeyRequest) returns (GetPublicKeyResponse);
+
+  // List key metadata. No ciphertext is ever returned.
+  rpc ListKeys(ListKeysRequest) returns (ListKeysResponse);
+
+  // Sign with the given key. The service must be unsealed.
+  rpc Sign(SignRequest) returns (SignResponse);
+
+  // Start an unseal session; returns session_id, nonce, and the signer's session public key.
+  rpc StartUnseal(StartUnsealRequest) returns (StartUnsealResponse);
+
+  // Submit an encrypted share as a share holder.
+  rpc SubmitUnsealShare(SubmitUnsealShareRequest) returns (SubmitUnsealShareResponse);
+
+  // Return the status of an unseal session.
+  rpc GetUnsealStatus(GetUnsealStatusRequest) returns (GetUnsealStatusResponse);
+
+  // Re-seal the service: wipe the KEK, DEKs, and private keys from memory and stop signing.
+  rpc Seal(SealRequest) returns (SealResponse);
+}
+
+// Elliptic curve.
+enum Curve {
+  CURVE_UNSPECIFIED = 0;
+  // secp256k1, used for EVM.
+  CURVE_SECP256K1 = 1;
+  // Edwards form of Curve25519, used with EdDSA (Ed25519).
+  CURVE_EDWARDS25519 = 2;
+}
+
+// Signature algorithm.
+enum SignatureAlgorithm {
+  SIGNATURE_ALGORITHM_UNSPECIFIED = 0;
+  // ECDSA; only secp256k1 is supported for now.
+  SIGNATURE_ALGORITHM_ECDSA = 1;
+  // EdDSA (Ed25519); only edwards25519 is supported for now.
+  SIGNATURE_ALGORITHM_EDDSA = 2;
+}
+
+// Supported curve/algorithm pairs in v0.1:
+//   CURVE_SECP256K1     + SIGNATURE_ALGORITHM_ECDSA
+//   CURVE_EDWARDS25519  + SIGNATURE_ALGORITHM_EDDSA
+// Any other combination returns INVALID_ARGUMENT.
+
+// Key state.
+enum KeyState {
+  KEY_STATE_UNSPECIFIED = 0;
+  KEY_STATE_CREATED = 1;
+  KEY_STATE_ACTIVE = 2;
+  KEY_STATE_ROTATING = 3;
+  KEY_STATE_DESTROYED = 4;
+}
+
+// Unseal session state.
+enum UnsealState {
+  UNSEAL_STATE_UNSPECIFIED = 0;
+  UNSEAL_STATE_COLLECTING = 1;
+  UNSEAL_STATE_UNSEALED = 2;
+  UNSEAL_STATE_EXPIRED = 3;
+  UNSEAL_STATE_FAILED = 4;
+}
+
+// Key metadata. Never contains the private key, DEKs, or any ciphertext.
+message Key {
+  string id = 1;
+  Curve curve = 2;
+  SignatureAlgorithm algorithm = 3;
+  bytes public_key = 4;
+  KeyState state = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message CreateKeyRequest {
+  Curve curve = 1;
+  SignatureAlgorithm algorithm = 2;
+
+  // Optional labels for lookup only; must not contain sensitive data.
+  map<string, string> labels = 3;
+}
+
+message CreateKeyResponse {
+  Key key = 1;
+}
+
+message ImportKeyRequest {
+  Curve curve = 1;
+  SignatureAlgorithm algorithm = 2;
+
+  // Private key to import; length and format depend on the curve:
+  //   secp256k1    — 32-byte big-endian private scalar
+  //   edwards25519 — 32-byte seed; the signer derives the public key
+  // Must be sent over mTLS. Neither the caller nor the signer may log this field.
+  bytes private_key = 3;
+
+  // Optional expected public key. When provided, the signer verifies the
+  // derived public key and rejects the import on mismatch.
+  bytes expected_public_key = 4;
+
+  // Optional labels for lookup only; must not contain sensitive data.
+  map<string, string> labels = 5;
+}
+
+message ImportKeyResponse {
+  Key key = 1;
+}
+
+message GetPublicKeyRequest {
+  string key_id = 1;
+}
+
+message GetPublicKeyResponse {
+  string key_id = 1;
+  Curve curve = 2;
+  SignatureAlgorithm algorithm = 3;
+  bytes public_key = 4;
+}
+
+message ListKeysRequest {
+  // Defaults to 50; maximum is 200.
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListKeysResponse {
+  repeated Key keys = 1;
+  string next_page_token = 2;
+}
+
+message SignRequest {
+  string key_id = 1;
+
+  // Data to sign; semantics depend on the key's algorithm:
+  //   ECDSA (secp256k1)     — must be a 32-byte digest (hashed by the caller)
+  //   EdDSA (edwards25519)  — the raw message
+  bytes payload = 2;
+
+  // Optional request ID for idempotency and audit correlation.
+  string request_id = 3;
+}
+
+message SignResponse {
+  string key_id = 1;
+
+  // Signature; format depends on the key's algorithm:
+  //   ECDSA (secp256k1)     — 65 bytes, r || s || v
+  //   EdDSA (edwards25519)  — 64 bytes
+  bytes signature = 2;
+
+  string request_id = 3;
+}
+
+message StartUnsealRequest {}
+
+message StartUnsealResponse {
+  string session_id = 1;
+
+  // Session nonce; share submissions must be bound to it to prevent replay.
+  bytes nonce = 2;
+
+  // The signer's ephemeral session public key; share holders encrypt shares to it.
+  bytes session_public_key = 3;
+
+  // Number of shares required.
+  int32 threshold = 4;
+
+  // Number of valid shares collected so far.
+  int32 shares_collected = 5;
+
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+message SubmitUnsealShareRequest {
+  string session_id = 1;
+
+  // Share holder identifier; the signer uses it to look up the identity public
+  // key and share index.
+  string share_holder_id = 2;
+
+  // Share encrypted with session_public_key.
+  bytes encrypted_share = 3;
+
+  // Signature by the share holder's identity key over the domain-separated,
+  // length-prefixed encoding of (encrypted_share, session_id, nonce).
+  bytes signature = 4;
+}
+
+message SubmitUnsealShareResponse {
+  int32 shares_collected = 1;
+  int32 threshold = 2;
+  UnsealState state = 3;
+}
+
+message GetUnsealStatusRequest {
+  string session_id = 1;
+}
+
+message GetUnsealStatusResponse {
+  string session_id = 1;
+  int32 threshold = 2;
+  int32 shares_collected = 3;
+  UnsealState state = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message SealRequest {}
+
+message SealResponse {
+  bool sealed = 1;
+}
