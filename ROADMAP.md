@@ -5,8 +5,10 @@
 - [ ] secp256k1 + ECDSA 与 edwards25519 + EdDSA 密钥生成
 - [ ] 导入已有私钥（secp256k1 标量 / edwards25519 种子）
 - [ ] 每密钥 DEK + KEK 信封加密（XChaCha20-Poly1305）
-- [ ] 对密钥加密密钥做 Shamir 秘密分享
-- [ ] 启动时收集份额完成解封
+- [x] Shamir 分片与 KEK 校验
+- [x] 解封会话、份额收集与 KEK 恢复（核心）
+- [ ] 份额传输加密、持有者签名与 VSS 校验
+- [ ] 通过 gRPC 接入启动解封流程
 - [ ] gRPC 接口：`CreateKey`、`GetPublicKey`、`ListKeys`、`Sign`、`StartUnseal`、`SubmitUnsealShare`、`GetUnsealStatus`、`Seal`
 - [ ] 审计日志
 - [ ] SQLite 存储后端

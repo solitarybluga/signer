@@ -5,8 +5,11 @@ edition = "2024"
 
 [dependencies]
 async-trait = "0.1"
+chacha20poly1305 = "0.10"
+rand = "0.8"
 serde = "1"
 serde_json = "1"
+sharks = "0.5"
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls-ring",
@@ -21,6 +24,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 thiserror = "2"
 time = "0.3"
 uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
 
 [dev-dependencies]
 testcontainers = "0.27"

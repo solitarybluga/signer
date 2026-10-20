@@ -2,6 +2,9 @@
 #[allow(dead_code, unused_imports)]
 mod storage;
 
+#[allow(dead_code)]
+mod unseal;
+
 fn main() {
     println!("Hello, world!");
 }
