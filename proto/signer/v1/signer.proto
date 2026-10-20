@@ -32,10 +32,10 @@ service SignerService {
   // Sign with the given key. The service must be unsealed.
   rpc Sign(SignRequest) returns (SignResponse);
 
-  // Start an unseal session; returns session_id, nonce, and the signer's session public key.
+  // Start an unseal session and return its session_id and nonce.
   rpc StartUnseal(StartUnsealRequest) returns (StartUnsealResponse);
 
-  // Submit an encrypted share as a share holder.
+  // Submit a share as a share holder.
   rpc SubmitUnsealShare(SubmitUnsealShareRequest) returns (SubmitUnsealShareResponse);
 
   // Return the status of an unseal session.
@@ -183,7 +183,7 @@ message StartUnsealResponse {
   // Session nonce; share submissions must be bound to it to prevent replay.
   bytes nonce = 2;
 
-  // The signer's ephemeral session public key; share holders encrypt shares to it.
+  // Reserved for share envelope encryption. Empty in v0.1.
   bytes session_public_key = 3;
 
   // Number of shares required.
@@ -202,11 +202,11 @@ message SubmitUnsealShareRequest {
   // key and share index.
   string share_holder_id = 2;
 
-  // Share encrypted with session_public_key.
-  bytes encrypted_share = 3;
+  // Raw Shamir share bytes. v0.1 does not add envelope encryption here;
+  // deploy behind mTLS and treat share encryption as a follow-up.
+  bytes share = 3;
 
-  // Signature by the share holder's identity key over the domain-separated,
-  // length-prefixed encoding of (encrypted_share, session_id, nonce).
+  // Reserved for holder signatures; must be empty in v0.1.
   bytes signature = 4;
 }
 

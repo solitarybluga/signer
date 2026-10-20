@@ -8,11 +8,13 @@
 
 | 变量 | 说明 | 必填 |
 | --- | --- | --- |
-| `SIGNER_BIND` | gRPC 监听地址 | 是 |
-| `SIGNER_STORAGE_URL` | SQLite 路径或 PostgreSQL URL | 是 |
+| `SIGNER_GRPC_ADDR` | gRPC 监听地址，默认 `127.0.0.1:50051` | 否 |
+| `SIGNER_DATA_DIR` | KEK 校验文件与份额目录，默认 `./data` | 否 |
+| `SIGNER_UNSEAL_THRESHOLD` | 解封阈值，默认 `3` | 否 |
+| `SIGNER_UNSEAL_TOTAL_SHARES` | 份额总数，默认 `5` | 否 |
+| `SIGNER_STORAGE_URL` | SQLite 路径或 PostgreSQL URL（待接入） | TODO |
 | `SIGNER_TLS_CERT` / `SIGNER_TLS_KEY` | 服务端证书（计划支持 mTLS） | TODO |
-| `SIGNER_UNSEAL_THRESHOLD` | 所需份额数 | 是 |
-| `SIGNER_LOG_LEVEL` | 默认 `info`；生产环境禁止 `debug` | 否 |
+| `SIGNER_LOG_LEVEL` | 日志级别（待接入） | 否 |
 
 TODO：补充 `.env.example`，启动时校验所有配置。
 

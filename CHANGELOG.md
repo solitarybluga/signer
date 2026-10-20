@@ -18,6 +18,7 @@
 - 实现 `PostgresStore` 与 `SqliteStore`，补充存储测试；PostgreSQL 测试通过 testcontainers 自动启动容器。
 - 新增 GitHub Actions CI（fmt、clippy、test）。
 - 实现门限解封核心：Shamir 分片、解封会话、KEK 校验与重新封存。
+- 将解封接口接入 gRPC（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal），新增服务启动流程与数据目录初始化。
 
 ### 变更
 

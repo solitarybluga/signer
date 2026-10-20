@@ -25,10 +25,11 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 | 模块 | 状态 |
 | --- | --- |
 | 存储模型、迁移、SQLite / PostgreSQL 实现 | ✅ 已实现，含测试 |
-| gRPC 接口定义 | ✅ proto 已定义，服务端未实现 |
+| 门限解封（Shamir 会话、KEK 恢复与校验） | ✅ 核心已实现 |
+| gRPC 解封接口（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal） | ✅ 已实现 |
 | 加密 keystore（DEK/KEK、Shamir 分享） | 🚧 开发中 |
-| 门限解封（Shamir 会话、KEK 恢复与校验） | 🚧 核心已实现，传输加密/鉴权待接入 |
-| 签名（ECDSA / EdDSA） | 🚧 未开始 |
+| 份额传输加密、持有者签名、VSS | 🚧 计划中 |
+| 密钥管理接口与签名（ECDSA / EdDSA） | 🚧 未开始 |
 
 ## v0.1 目标特性
 
@@ -38,7 +39,7 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 - 支持导入已有私钥（secp256k1 标量 / edwards25519 种子）
 - 门限解封：对密钥加密密钥做 Shamir 秘密分享，解封时用 KEK 校验密文验证重建结果（VSS 待补）
 - 签名：secp256k1 + ECDSA（EVM）与 edwards25519 + EdDSA（Solana）
-- gRPC 接口（tonic），含健康检查与反射
+- gRPC 解封接口（tonic）：StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal
 - 所有密钥操作写入审计日志
 - 存储层抽象：SQLite（单机）/ PostgreSQL（集群）共用同一套 trait
 
@@ -60,15 +61,20 @@ flowchart LR
 
 ## 快速开始
 
-当前只实现了存储层，服务端尚未接入。
+前置：Rust 1.85+、Docker（运行测试时）。protoc 已由 `protoc-bin-vendored` 随构建提供。
 
 ```bash
-cargo test   # 存储测试；PostgreSQL 用例需要本机 Docker
+cargo test
+cargo run
 ```
+
+首次启动会在 `data/` 下生成 KEK 校验文件和 5 份份额（默认 3-of-5），并把解封 gRPC 服务监听在 `127.0.0.1:50051`。份额文件必须离线分发给持有者，不能提交到仓库。
+
+可用环境变量：`SIGNER_GRPC_ADDR`、`SIGNER_DATA_DIR`、`SIGNER_UNSEAL_THRESHOLD`、`SIGNER_UNSEAL_TOTAL_SHARES`。
 
 ## API
 
-gRPC 定义见 [`proto/signer/v1/signer.proto`](proto/signer/v1/signer.proto)。以下接口已定义，服务端尚未实现。
+gRPC 定义见 [`proto/signer/v1/signer.proto`](proto/signer/v1/signer.proto)。解封相关方法已实现；`CreateKey`、`ImportKey`、`GetPublicKey`、`ListKeys`、`Sign` 目前返回 `UNIMPLEMENTED`。
 
 | 方法 | 说明 |
 | --- | --- |

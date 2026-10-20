@@ -8,7 +8,7 @@
 - [x] Shamir 分片与 KEK 校验
 - [x] 解封会话、份额收集与 KEK 恢复（核心）
 - [ ] 份额传输加密、持有者签名与 VSS 校验
-- [ ] 通过 gRPC 接入启动解封流程
+- [x] 通过 gRPC 接入启动解封流程
 - [ ] gRPC 接口：`CreateKey`、`GetPublicKey`、`ListKeys`、`Sign`、`StartUnseal`、`SubmitUnsealShare`、`GetUnsealStatus`、`Seal`
 - [ ] 审计日志
 - [ ] SQLite 存储后端

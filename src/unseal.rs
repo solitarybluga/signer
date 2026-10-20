@@ -176,6 +176,7 @@ struct Session {
     nonce: [u8; 32],
     threshold: u8,
     shares: HashMap<String, Share>,
+    shares_collected: u32,
     state: SessionState,
     expires_at: OffsetDateTime,
 }
@@ -186,7 +187,7 @@ impl Session {
             id: self.id,
             nonce: self.nonce,
             threshold: self.threshold,
-            shares_collected: self.shares.len() as u32,
+            shares_collected: self.shares_collected,
             state: self.state,
             expires_at: self.expires_at,
         }
@@ -270,6 +271,7 @@ impl UnsealManager {
             nonce: random_array::<32>(),
             threshold: self.config.threshold,
             shares: HashMap::new(),
+            shares_collected: 0,
             state: SessionState::Collecting,
             expires_at: OffsetDateTime::now_utc() + self.config.session_ttl,
         };
@@ -320,10 +322,11 @@ impl UnsealManager {
                 return Err(UnsealError::DuplicateHolder(holder_id.to_string()));
             }
             session.shares.insert(holder_id.to_string(), share);
+            session.shares_collected = session.shares.len() as u32;
 
             if session.shares.len() < session.threshold as usize {
                 return Ok(UnsealOutcome::Collected {
-                    shares_collected: session.shares.len() as u32,
+                    shares_collected: session.shares_collected,
                     threshold: session.threshold,
                 });
             }
