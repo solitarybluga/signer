@@ -21,79 +21,296 @@
       </label>
     </header>
 
+    <nav class="tabs" role="tablist" aria-label="功能切换">
+      <button
+        id="tab-button-operator"
+        class="tab active"
+        role="tab"
+        aria-selected="true"
+        aria-controls="tab-operator"
+        data-tab="operator"
+        type="button"
+      >
+        操作员
+      </button>
+      <button
+        id="tab-button-holder"
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        aria-controls="tab-holder"
+        data-tab="holder"
+        tabindex="-1"
+        type="button"
+      >
+        份额持有者
+      </button>
+    </nav>
+
     <main>
-      <section class="card">
-        <div class="card-head">
-          <h2>会话状态</h2>
-          <span id="state-badge" class="badge" data-state="sealed">sealed</span>
-        </div>
-
-        <div class="progress" aria-hidden="true">
-          <div id="progress-bar"></div>
-        </div>
-
-        <div class="stats">
-          <div>
-            <strong id="collected">0</strong>
-            <span>已收集份额</span>
+      <div
+        id="tab-operator"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tab-button-operator"
+      >
+        <section class="card">
+          <div class="card-head">
+            <h2>会话状态</h2>
+            <span id="state-badge" class="badge" data-state="sealed">sealed</span>
           </div>
-          <div>
-            <strong id="threshold">–</strong>
-            <span>解封阈值</span>
+
+          <div class="progress" aria-hidden="true">
+            <div id="progress-bar"></div>
           </div>
-        </div>
 
-        <dl class="meta">
-          <div>
-            <dt>Session ID</dt>
-            <dd id="session-id">—</dd>
-            <button id="copy-session" class="link" type="button">复制</button>
+          <div class="stats">
+            <div>
+              <strong id="collected">0</strong>
+              <span>已收集份额</span>
+            </div>
+            <div>
+              <strong id="threshold">–</strong>
+              <span>解封阈值</span>
+            </div>
           </div>
-          <div>
-            <dt>Nonce</dt>
-            <dd id="nonce" class="mono">—</dd>
+
+          <dl class="meta">
+            <div>
+              <dt>Session ID</dt>
+              <dd id="session-id">—</dd>
+              <button id="copy-session" class="link" type="button">复制</button>
+            </div>
+            <div>
+              <dt>Nonce</dt>
+              <dd id="nonce" class="mono">—</dd>
+            </div>
+            <div>
+              <dt>过期时间</dt>
+              <dd id="expires">—</dd>
+            </div>
+          </dl>
+
+          <div class="actions">
+            <button id="start-btn" class="primary" type="button">发起解封会话</button>
+            <button id="seal-btn" class="ghost" type="button">重新封存</button>
           </div>
-          <div>
-            <dt>过期时间</dt>
-            <dd id="expires">—</dd>
+        </section>
+      </div>
+
+      <div
+        id="tab-holder"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tab-button-holder"
+        hidden
+      >
+        <section class="card holder-card">
+          <div class="card-head">
+            <h2>份额持有者</h2>
+            <span class="hint">身份、份额导入与 vault</span>
           </div>
-        </dl>
 
-        <div class="actions">
-          <button id="start-btn" class="primary" type="button">发起解封会话</button>
-          <button id="seal-btn" class="ghost" type="button">重新封存</button>
-        </div>
-      </section>
+          <div class="subtabs" role="tablist" aria-label="持有者流程">
+            <button
+              id="subtab-button-distribution"
+              class="subtab active"
+              role="tab"
+              aria-selected="true"
+              aria-controls="holder-subtab-distribution"
+              data-subtab="distribution"
+              type="button"
+            >
+              密钥分发
+            </button>
+            <button
+              id="subtab-button-unseal"
+              class="subtab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="holder-subtab-unseal"
+              data-subtab="unseal"
+              tabindex="-1"
+              type="button"
+            >
+              Unseal
+            </button>
+          </div>
 
-      <section class="card">
-        <div class="card-head">
-          <h2>份额持有者</h2>
-          <span class="hint">上传你的 share 文件</span>
-        </div>
+          <div
+            id="holder-subtab-distribution"
+            class="subtab-panel"
+            role="tabpanel"
+            aria-labelledby="subtab-button-distribution"
+          >
+          <div class="holder-section">
+            <h3>1. 身份</h3>
+            <label class="field">
+              <span>Holder ID</span>
+              <input id="identity-holder-id" placeholder="例如 alice" spellcheck="false" />
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span>口令</span>
+                <input id="identity-passphrase" type="password" autocomplete="new-password" />
+              </label>
+              <label class="field">
+                <span>确认口令</span>
+                <input
+                  id="identity-passphrase-confirm"
+                  type="password"
+                  autocomplete="new-password"
+                />
+              </label>
+            </div>
+            <label class="field">
+              <span>身份文件（保存路径）</span>
+              <div class="picker">
+                <input id="identity-path" readonly placeholder="选择保存位置" />
+                <button id="pick-identity-save" class="ghost" type="button">选择…</button>
+              </div>
+            </label>
+            <label class="field">
+              <span>公开信息文件（保存路径）</span>
+              <div class="picker">
+                <input id="identity-public-path" readonly placeholder="选择保存位置" />
+                <button id="pick-identity-public-save" class="ghost" type="button">选择…</button>
+              </div>
+            </label>
+            <div class="actions">
+              <button id="create-identity-btn" class="primary" type="button">生成身份</button>
+              <button id="export-public-btn" class="ghost" type="button">导出公开信息</button>
+            </div>
+            <p id="identity-result" class="note"></p>
+          </div>
 
-        <label class="field">
-          <span>Session ID</span>
-          <input id="holder-session" placeholder="粘贴操作员发来的 Session ID" spellcheck="false" />
-        </label>
-        <label class="field">
-          <span>持有者标识</span>
-          <input id="holder-id" placeholder="例如 holder-1" spellcheck="false" />
-        </label>
-        <label class="field">
-          <span>持有者私钥</span>
-          <input id="holder-secret" type="file" accept=".key,application/octet-stream" />
-        </label>
-        <label class="field">
-          <span>加密份额文件</span>
-          <input id="share-file" type="file" accept=".share,application/octet-stream" />
-        </label>
+          <div class="holder-section">
+            <h3>2. 导入份额</h3>
+            <label class="field">
+              <span>身份文件</span>
+              <div class="picker">
+                <input id="import-identity-path" readonly placeholder="选择 .key 文件" />
+                <button id="pick-import-identity" class="ghost" type="button">选择…</button>
+              </div>
+            </label>
+            <label class="field">
+              <span>加密份额文件</span>
+              <div class="picker">
+                <input id="import-share-path" readonly placeholder="选择 .share 文件" />
+                <button id="pick-import-share" class="ghost" type="button">选择…</button>
+              </div>
+            </label>
+            <label class="field">
+              <span>Vault 保存路径</span>
+              <div class="picker">
+                <input id="import-vault-path" readonly placeholder="选择保存位置" />
+                <button id="pick-import-vault" class="ghost" type="button">选择…</button>
+              </div>
+            </label>
 
-        <button id="submit-btn" class="primary" type="button">解密并提交份额</button>
-        <p class="note">
-          由 <code>signer-admin init</code> 生成的 <code>.share</code> 文件需要配合你的
-          私钥解密。v0.1 通过本机 gRPC 明文传输解密后的份额，请只在可信环境使用。
-        </p>
-      </section>
+            <details class="optional-package">
+              <summary>可选：operator 签名的 manifest</summary>
+              <p class="note">
+                三项必须同时提供；不提供则按 legacy 方式导入，无法验证 operator 签名。
+              </p>
+              <label class="field">
+                <span>manifest.json</span>
+                <div class="picker">
+                  <input id="import-manifest-path" readonly placeholder="选择 manifest.json" />
+                  <button id="pick-import-manifest" class="ghost" type="button">选择…</button>
+                </div>
+              </label>
+              <label class="field">
+                <span>manifest.sig</span>
+                <div class="picker">
+                  <input
+                    id="import-manifest-sig-path"
+                    readonly
+                    placeholder="选择 manifest.sig"
+                  />
+                  <button id="pick-import-manifest-sig" class="ghost" type="button">
+                    选择…
+                  </button>
+                </div>
+              </label>
+              <label class="field">
+                <span>operator.pub</span>
+                <div class="picker">
+                  <input
+                    id="import-operator-pub-path"
+                    readonly
+                    placeholder="选择 operator.pub"
+                  />
+                  <button id="pick-import-operator-pub" class="ghost" type="button">
+                    选择…
+                  </button>
+                </div>
+              </label>
+              <label class="field">
+                <span>operator 指纹（可选，带外核对）</span>
+                <input
+                  id="import-operator-fingerprint"
+                  placeholder="粘贴 operator 公布的 64 位指纹"
+                  spellcheck="false"
+                />
+              </label>
+            </details>
+
+            <label class="field">
+              <span>口令</span>
+              <input id="import-passphrase" type="password" autocomplete="current-password" />
+            </label>
+            <button id="import-share-btn" class="primary" type="button">验证并存入 vault</button>
+            <p id="import-result" class="note"></p>
+          </div>
+          </div>
+
+          <div
+            id="holder-subtab-unseal"
+            class="subtab-panel"
+            role="tabpanel"
+            aria-labelledby="subtab-button-unseal"
+            hidden
+          >
+            <div class="unseal-status">
+              <span id="holder-unseal-state" class="badge" data-state="sealed">sealed</span>
+              <span class="hint">
+                已收集 <strong id="holder-unseal-collected">0</strong> /
+                <span id="holder-unseal-threshold">–</span> 份额
+              </span>
+            </div>
+
+            <div class="holder-section">
+              <h3>提交份额</h3>
+            <label class="field">
+              <span>Session ID</span>
+              <input
+                id="holder-session"
+                placeholder="粘贴操作员发来的 Session ID"
+                spellcheck="false"
+              />
+            </label>
+            <label class="field">
+              <span>Vault 文件</span>
+              <div class="picker">
+                <input id="submit-vault-path" readonly placeholder="选择 .vault 文件" />
+                <button id="pick-submit-vault" class="ghost" type="button">选择…</button>
+              </div>
+            </label>
+            <label class="field">
+              <span>口令</span>
+              <input id="submit-passphrase" type="password" autocomplete="current-password" />
+            </label>
+              <button id="submit-vault-btn" class="primary" type="button">
+                解锁并提交份额
+              </button>
+              <p class="note">
+                v0.1 通过本机 gRPC 明文传输解密后的份额，请只在可信环境使用。
+              </p>
+            </div>
+          </div>
+        </section>
+      </div>
 
       <section class="card log-card">
         <div class="card-head">
@@ -104,7 +321,7 @@
       </section>
     </main>
 
-    <footer>signer v0.1 · 本地演示客户端 · 未经安全审计</footer>
+    <footer>signer v0.1 · holder 身份与份额 vault · 未经安全审计</footer>
     <script src="app.js"></script>
   </body>
 </html>

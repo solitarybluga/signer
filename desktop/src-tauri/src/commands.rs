@@ -1,7 +1,14 @@
+use std::path::Path;
+
 use serde::Serialize;
+use tauri::async_runtime::spawn_blocking;
 use tonic::transport::Channel;
 use zeroize::Zeroizing;
 
+use signer_holder::{
+    HolderError, HolderIdentity, ManifestPackage, ShareVault, VaultInfo, decode_operator_public,
+    decode_signature, import_share, operator_fingerprint,
+};
 use signer_proto::pb;
 use signer_proto::pb::signer_service_client::SignerServiceClient;
 
@@ -39,6 +46,31 @@ impl SessionView {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct IdentityView {
+    pub holder_id: String,
+    pub ed25519_public: String,
+    pub x25519_public: String,
+    pub fingerprint: String,
+    pub identity_path: String,
+    pub public_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PublicBundleView {
+    pub holder_id: String,
+    pub ed25519_public: String,
+    pub x25519_public: String,
+    pub fingerprint: String,
+    pub public_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportResult {
+    pub vault: VaultInfo,
+    pub operator_fingerprint: Option<String>,
+}
+
 fn state_name(value: i32) -> String {
     match pb::UnsealState::try_from(value) {
         Ok(pb::UnsealState::Collecting) => "collecting".to_string(),
@@ -53,6 +85,46 @@ fn grpc_error(status: tonic::Status) -> String {
     format!("{}: {}", status.code(), status.message())
 }
 
+fn holder_error(error: HolderError) -> String {
+    match error {
+        HolderError::InvalidPassphraseOrCorrupt => "口令错误或文件已损坏".to_string(),
+        HolderError::AlreadyExists => "目标文件已存在，请选择其他路径".to_string(),
+        HolderError::InvalidHolderId => "Holder ID 无效（1-64 位字母、数字或 . _ -）".to_string(),
+        HolderError::InvalidCeremonyId => "ceremony id 无效".to_string(),
+        HolderError::EmptyPassphrase => "口令不能为空".to_string(),
+        HolderError::InvalidIdentity => "身份文件格式无效".to_string(),
+        HolderError::InvalidVault => "vault 文件格式无效".to_string(),
+        HolderError::InvalidPublicBundle => "公开信息文件格式无效".to_string(),
+        HolderError::InvalidManifest => "manifest 格式无效".to_string(),
+        HolderError::InvalidManifestSignature => "manifest 签名验证失败".to_string(),
+        HolderError::OperatorFingerprintMismatch => {
+            "operator 公钥指纹与带外核对值不一致".to_string()
+        }
+        HolderError::HolderNotInManifest => "manifest 中没有当前 holder".to_string(),
+        HolderError::HolderMismatch => "manifest 中的公钥与当前身份不匹配".to_string(),
+        HolderError::EnvelopeHashMismatch => "份额信封哈希与 manifest 不匹配".to_string(),
+        HolderError::InvalidShare => "份额格式无效".to_string(),
+        HolderError::IndexMismatch => "份额索引与 manifest 不匹配".to_string(),
+        HolderError::InvalidKdfParams => "文件中的 KDF 参数超出允许范围".to_string(),
+        HolderError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            "文件不存在".to_string()
+        }
+        HolderError::Io(_) | HolderError::Json(_) | HolderError::Share(_) | HolderError::Crypto => {
+            "本地文件或密码学操作失败".to_string()
+        }
+    }
+}
+
+async fn blocking<T, F>(task: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    spawn_blocking(task)
+        .await
+        .map_err(|error| format!("后台任务失败: {error}"))?
+}
+
 async fn connect(server_url: &str) -> Result<SignerServiceClient<Channel>, String> {
     let target = if server_url.contains("://") {
         server_url.to_string()
@@ -65,43 +137,19 @@ async fn connect(server_url: &str) -> Result<SignerServiceClient<Channel>, Strin
         .map_err(|error| format!("failed to connect to signer: {error}"))
 }
 
-#[tauri::command(rename_all = "snake_case")]
-pub async fn start_unseal(server_url: String) -> Result<SessionView, String> {
-    let mut client = connect(&server_url).await?;
-    let response = client
-        .start_unseal(pb::StartUnsealRequest {})
-        .await
-        .map_err(grpc_error)?
-        .into_inner();
-
-    Ok(SessionView::from_start(response))
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub async fn submit_share(
-    server_url: String,
+async fn submit_share_bytes(
+    server_url: &str,
     session_id: String,
     holder_id: String,
-    share_envelope: Vec<u8>,
-    holder_secret: Vec<u8>,
+    share: Vec<u8>,
 ) -> Result<SessionView, String> {
-    let holder_secret = Zeroizing::new(holder_secret);
-    let secret: [u8; 32] = holder_secret
-        .as_slice()
-        .try_into()
-        .map_err(|_| "holder secret must be 32 bytes".to_string())?;
-    let secret = Zeroizing::new(secret);
-
-    let share = signer_share::decrypt_share(&secret, &share_envelope)
-        .map_err(|error| format!("failed to decrypt share: {error}"))?;
-
-    let mut client = connect(&server_url).await?;
+    let mut client = connect(server_url).await?;
 
     client
         .submit_unseal_share(pb::SubmitUnsealShareRequest {
             session_id: session_id.clone(),
             share_holder_id: holder_id,
-            share: share.to_vec(),
+            share,
             signature: Vec::new(),
         })
         .await
@@ -114,6 +162,18 @@ pub async fn submit_share(
         .into_inner();
 
     Ok(SessionView::from_status(status))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn start_unseal(server_url: String) -> Result<SessionView, String> {
+    let mut client = connect(&server_url).await?;
+    let response = client
+        .start_unseal(pb::StartUnsealRequest {})
+        .await
+        .map_err(grpc_error)?
+        .into_inner();
+
+    Ok(SessionView::from_start(response))
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -138,4 +198,190 @@ pub async fn seal(server_url: String) -> Result<bool, String> {
         .into_inner();
 
     Ok(response.sealed)
+}
+
+/// Legacy command kept for existing callers. New UI uses the holder vault flow.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn submit_share(
+    server_url: String,
+    session_id: String,
+    holder_id: String,
+    share_envelope: Vec<u8>,
+    holder_secret: Vec<u8>,
+) -> Result<SessionView, String> {
+    let holder_secret = Zeroizing::new(holder_secret);
+    let secret: [u8; 32] = holder_secret
+        .as_slice()
+        .try_into()
+        .map_err(|_| "holder secret must be 32 bytes".to_string())?;
+    let secret = Zeroizing::new(secret);
+
+    let share = signer_share::decrypt_share(&secret, &share_envelope)
+        .map_err(|error| format!("failed to decrypt share: {error}"))?;
+
+    submit_share_bytes(&server_url, session_id, holder_id, share.to_vec()).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn holder_create_identity(
+    holder_id: String,
+    passphrase: String,
+    identity_path: String,
+    public_path: String,
+) -> Result<IdentityView, String> {
+    let passphrase = Zeroizing::new(passphrase);
+
+    blocking(move || {
+        let identity = HolderIdentity::generate(&holder_id).map_err(holder_error)?;
+        let bundle = identity
+            .save_encrypted(Path::new(&identity_path), &passphrase)
+            .map_err(holder_error)?;
+        let public_json = bundle.to_json_pretty().map_err(holder_error)?;
+        signer_holder::write_atomic(Path::new(&public_path), public_json.as_bytes(), false)
+            .map_err(holder_error)?;
+        let fingerprint = bundle.fingerprint().map_err(holder_error)?;
+
+        Ok(IdentityView {
+            holder_id: bundle.holder_id,
+            ed25519_public: bundle.ed25519_public,
+            x25519_public: bundle.x25519_public,
+            fingerprint,
+            identity_path,
+            public_path,
+        })
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn holder_export_public(
+    identity_path: String,
+    passphrase: String,
+    public_path: String,
+) -> Result<PublicBundleView, String> {
+    let passphrase = Zeroizing::new(passphrase);
+
+    blocking(move || {
+        let identity = HolderIdentity::load_encrypted(Path::new(&identity_path), &passphrase)
+            .map_err(holder_error)?;
+        let bundle = identity.public_bundle();
+        let public_json = bundle.to_json_pretty().map_err(holder_error)?;
+        signer_holder::write_atomic(Path::new(&public_path), public_json.as_bytes(), true)
+            .map_err(holder_error)?;
+        let fingerprint = bundle.fingerprint().map_err(holder_error)?;
+
+        Ok(PublicBundleView {
+            holder_id: bundle.holder_id,
+            ed25519_public: bundle.ed25519_public,
+            x25519_public: bundle.x25519_public,
+            fingerprint,
+            public_path,
+        })
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
+pub async fn holder_import_share(
+    identity_path: String,
+    share_path: String,
+    vault_path: String,
+    passphrase: String,
+    manifest_path: Option<String>,
+    manifest_sig_path: Option<String>,
+    operator_pub_path: Option<String>,
+    expected_operator_fingerprint: Option<String>,
+) -> Result<ImportResult, String> {
+    let package_present =
+        manifest_path.is_some() || manifest_sig_path.is_some() || operator_pub_path.is_some();
+    let package_complete =
+        manifest_path.is_some() && manifest_sig_path.is_some() && operator_pub_path.is_some();
+    let expected_operator_fingerprint = expected_operator_fingerprint
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+
+    if package_present && !package_complete {
+        return Err("manifest、manifest.sig、operator.pub 必须同时提供或同时留空".to_string());
+    }
+    if !package_present && expected_operator_fingerprint.is_some() {
+        return Err("未提供 manifest 时无法核对 operator 指纹".to_string());
+    }
+
+    let passphrase = Zeroizing::new(passphrase);
+
+    blocking(move || {
+        let identity = HolderIdentity::load_encrypted(Path::new(&identity_path), &passphrase)
+            .map_err(holder_error)?;
+        let envelope =
+            std::fs::read(&share_path).map_err(|error| format!("读取份额文件失败: {error}"))?;
+
+        let imported = if let (Some(manifest_path), Some(sig_path), Some(pub_path)) =
+            (manifest_path, manifest_sig_path, operator_pub_path)
+        {
+            let manifest_bytes = std::fs::read(&manifest_path)
+                .map_err(|error| format!("读取 manifest 失败: {error}"))?;
+            let signature_text = std::fs::read_to_string(&sig_path)
+                .map_err(|error| format!("读取 manifest 签名失败: {error}"))?;
+            let public_text = std::fs::read_to_string(&pub_path)
+                .map_err(|error| format!("读取 operator 公钥失败: {error}"))?;
+            let signature = decode_signature(&signature_text).map_err(holder_error)?;
+            let operator_public = decode_operator_public(&public_text).map_err(holder_error)?;
+
+            if let Some(expected) = expected_operator_fingerprint.as_deref() {
+                let actual = operator_fingerprint(&operator_public);
+                if expected != actual {
+                    return Err(holder_error(HolderError::OperatorFingerprintMismatch));
+                }
+            }
+
+            import_share(
+                &identity,
+                &envelope,
+                Some(ManifestPackage {
+                    manifest_bytes: &manifest_bytes,
+                    signature: &signature,
+                    operator_public: &operator_public,
+                }),
+            )
+            .map_err(holder_error)?
+        } else {
+            import_share(&identity, &envelope, None).map_err(holder_error)?
+        };
+
+        let operator_fingerprint = imported.operator_fingerprint.clone();
+        let vault = imported
+            .seal(Path::new(&vault_path), &passphrase)
+            .map_err(holder_error)?;
+
+        Ok(ImportResult {
+            vault,
+            operator_fingerprint,
+        })
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn holder_vault_info(vault_path: String) -> Result<VaultInfo, String> {
+    ShareVault::info(Path::new(&vault_path)).map_err(holder_error)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn holder_submit_from_vault(
+    server_url: String,
+    session_id: String,
+    vault_path: String,
+    passphrase: String,
+) -> Result<SessionView, String> {
+    let passphrase = Zeroizing::new(passphrase);
+
+    let (info, share) = blocking(move || {
+        ShareVault::open(Path::new(&vault_path), &passphrase).map_err(holder_error)
+    })
+    .await?;
+
+    let view = submit_share_bytes(&server_url, session_id, info.holder_id, share.to_vec()).await?;
+
+    Ok(view)
 }

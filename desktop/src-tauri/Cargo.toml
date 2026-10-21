@@ -9,9 +9,11 @@ description = "Desktop client for the signer quorum unsealing flow"
 [dependencies]
 hex.workspace = true
 serde.workspace = true
+signer-holder = { path = "../../crates/holder" }
 signer-proto = { path = "../../crates/proto" }
 signer-share = { path = "../../crates/share" }
 tauri.workspace = true
+tauri-plugin-dialog.workspace = true
 tonic.workspace = true
 zeroize.workspace = true
 

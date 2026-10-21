@@ -6,8 +6,13 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use signer_core::unseal::{KekCheckFile, UnsealConfig, UnsealManager};
+use signer_holder::{
+    HolderEntry, Manifest, PublicBundle, generate_operator_key, operator_fingerprint,
+    operator_public, sha256_hex, sign_manifest, validate_holder_id, write_atomic,
+};
 use signer_share::{HolderKeypair, encrypt_share};
-use zeroize::Zeroize;
+use uuid::Uuid;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Parser)]
 #[command(
@@ -21,11 +26,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate an X25519 keypair for one share holder.
+    /// Generate an X25519 keypair for one share holder (legacy raw key file).
     HolderKeygen {
         /// Path for the holder's private key file.
         #[arg(long)]
         out: PathBuf,
+    },
+
+    /// Generate an Ed25519 operator signing keypair for share manifests.
+    OperatorKeygen {
+        /// Path for the operator's private key file.
+        #[arg(long)]
+        out: PathBuf,
+
+        /// Path for the operator's public key file (hex).
+        #[arg(long)]
+        pub_out: PathBuf,
     },
 
     /// Generate a KEK, split it, and export encrypted share envelopes.
@@ -42,9 +58,13 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         total_shares: u8,
 
-        /// JSON file with [{ "id": "...", "public_key": "<hex>" }, ...].
+        /// JSON file with legacy holders or holder public bundles.
         #[arg(long)]
         holders: PathBuf,
+
+        /// Optional Ed25519 operator key used to sign manifest.json.
+        #[arg(long)]
+        operator_key: Option<PathBuf>,
 
         /// Overwrite an existing initialization.
         #[arg(long)]
@@ -53,21 +73,95 @@ enum Command {
 }
 
 #[derive(Debug, Deserialize)]
-struct HolderSpec {
+#[serde(untagged)]
+enum HolderSpec {
+    /// Legacy: {"id": "...", "public_key": "<x25519 hex>"}
+    Legacy { id: String, public_key: String },
+
+    /// Desktop public bundle: holder_id, both public keys, self-signature.
+    Bundle {
+        holder_id: String,
+        x25519_public: String,
+        #[serde(default)]
+        ed25519_public: Option<String>,
+        #[serde(default)]
+        self_signature: Option<String>,
+        #[serde(default)]
+        version: Option<u8>,
+    },
+}
+
+impl HolderSpec {
+    fn into_registered(self) -> Result<RegisteredHolder, Box<dyn Error>> {
+        match self {
+            HolderSpec::Legacy { id, public_key } => {
+                validate_holder_id(&id)?;
+                Ok(RegisteredHolder {
+                    x25519_public: decode_x25519(&id, &public_key)?,
+                    id,
+                    ed25519_public: None,
+                })
+            }
+            HolderSpec::Bundle {
+                holder_id,
+                x25519_public,
+                ed25519_public,
+                self_signature,
+                version,
+            } => {
+                let ed25519_public = ed25519_public.ok_or_else(|| {
+                    format!("public bundle for {holder_id} is missing ed25519_public")
+                })?;
+                let self_signature = self_signature.ok_or_else(|| {
+                    format!("public bundle for {holder_id} is missing self_signature")
+                })?;
+
+                let bundle = PublicBundle {
+                    version: version.unwrap_or(1),
+                    holder_id: holder_id.clone(),
+                    ed25519_public,
+                    x25519_public,
+                    self_signature,
+                };
+                let material = bundle
+                    .verify()
+                    .map_err(|error| format!("invalid public bundle for {holder_id}: {error}"))?;
+
+                Ok(RegisteredHolder {
+                    id: material.holder_id,
+                    x25519_public: material.x25519_public,
+                    ed25519_public: Some(material.ed25519_public),
+                })
+            }
+        }
+    }
+}
+
+struct RegisteredHolder {
     id: String,
-    public_key: String,
+    x25519_public: [u8; 32],
+    ed25519_public: Option<[u8; 32]>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     match Cli::parse().command {
         Command::HolderKeygen { out } => holder_keygen(&out),
+        Command::OperatorKeygen { out, pub_out } => operator_keygen(&out, &pub_out),
         Command::Init {
             data_dir,
             threshold,
             total_shares,
             holders,
+            operator_key,
             force,
-        } => init(&data_dir, threshold, total_shares, &holders, force),
+        } => init(
+            &data_dir,
+            threshold,
+            total_shares,
+            &holders,
+            operator_key.as_deref(),
+            force,
+        ),
     }
 }
 
@@ -81,9 +175,33 @@ fn holder_keygen(out: &Path) -> Result<(), Box<dyn Error>> {
     }
     write_private(out, keypair.secret_bytes())?;
 
-    println!("holder secret: {}", out.display());
+    println!("legacy holder secret: {}", out.display());
     println!("holder public key: {}", hex::encode(keypair.public_bytes()));
     println!("give the public key to the operator and keep the secret file offline");
+    println!("the desktop client now supports the newer Ed25519 + X25519 identity bundle");
+
+    Ok(())
+}
+
+fn operator_keygen(out: &Path, pub_out: &Path) -> Result<(), Box<dyn Error>> {
+    let (secret, public) = generate_operator_key()?;
+    let secret = Zeroizing::new(secret);
+
+    write_atomic(out, &secret[..], false)?;
+    write_atomic(
+        pub_out,
+        format!("{}\n", hex::encode(public)).as_bytes(),
+        false,
+    )?;
+
+    println!("operator secret: {}", out.display());
+    println!("operator public key: {}", hex::encode(public));
+    println!(
+        "operator public fingerprint: {}",
+        operator_fingerprint(&public)
+    );
+    println!("keep the secret offline and pin the public key in the desktop client");
+    println!("never commit the operator secret");
 
     Ok(())
 }
@@ -93,6 +211,7 @@ fn init(
     threshold: u8,
     total_shares: u8,
     holders_path: &Path,
+    operator_key: Option<&Path>,
     force: bool,
 ) -> Result<(), Box<dyn Error>> {
     let raw = fs::read_to_string(holders_path)?;
@@ -108,27 +227,32 @@ fn init(
     }
 
     let mut ids = HashSet::new();
-    let mut recipients = Vec::with_capacity(holders.len());
-    for holder in &holders {
-        if holder.id.is_empty() {
-            return Err("holder id cannot be empty".into());
-        }
+    let mut public_keys = HashSet::new();
+    let mut registered = Vec::with_capacity(holders.len());
+    for holder in holders {
+        let holder = holder.into_registered()?;
         if !ids.insert(holder.id.clone()) {
             return Err(format!("duplicate holder id: {}", holder.id).into());
         }
-
-        let public_key = hex::decode(&holder.public_key)
-            .map_err(|error| format!("invalid public key for {}: {error}", holder.id))?;
-        let public_key: [u8; 32] = public_key
-            .try_into()
-            .map_err(|_| format!("public key for {} must be 32 bytes", holder.id))?;
-        recipients.push(public_key);
+        if !public_keys.insert(holder.x25519_public) {
+            return Err(format!("duplicate x25519 public key for {}", holder.id).into());
+        }
+        registered.push(holder);
     }
 
     let check_path = data_dir.join("kek_check.json");
     let shares_dir = data_dir.join("shares");
+    let manifest_path = data_dir.join("manifest.json");
+    let signature_path = data_dir.join("manifest.sig");
+    let operator_pub_path = data_dir.join("operator.pub");
 
-    if !force && (check_path.exists() || shares_dir.exists()) {
+    if !force
+        && (check_path.exists()
+            || shares_dir.exists()
+            || manifest_path.exists()
+            || signature_path.exists()
+            || operator_pub_path.exists())
+    {
         return Err(format!(
             "{} is already initialized; pass --force to overwrite",
             data_dir.display()
@@ -137,8 +261,15 @@ fn init(
     }
 
     if force {
-        if check_path.exists() {
-            fs::remove_file(&check_path)?;
+        for path in [
+            &check_path,
+            &manifest_path,
+            &signature_path,
+            &operator_pub_path,
+        ] {
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
         }
         if shares_dir.exists() {
             fs::remove_dir_all(&shares_dir)?;
@@ -156,22 +287,77 @@ fn init(
     println!("wrote KEK check: {}", check_path.display());
     println!("encrypted shares:");
 
-    for ((mut share, holder), public_key) in shares
-        .into_iter()
-        .zip(holders.iter())
-        .zip(recipients.iter())
-    {
-        let envelope = encrypt_share(public_key, &share)?;
+    let ceremony_id = Uuid::new_v4().to_string();
+    let mut manifest_holders = Vec::with_capacity(registered.len());
+
+    for (index, (mut share, holder)) in shares.into_iter().zip(registered.iter()).enumerate() {
+        let envelope = encrypt_share(&holder.x25519_public, &share)?;
         let path = shares_dir.join(format!("{}.share", holder.id));
         write_private(&path, &envelope)?;
-        share.zeroize();
 
+        manifest_holders.push(HolderEntry {
+            id: holder.id.clone(),
+            index: (index + 1) as u8,
+            x25519_public: hex::encode(holder.x25519_public),
+            ed25519_public: holder.ed25519_public.map(hex::encode),
+            envelope_sha256: sha256_hex(&envelope),
+        });
+
+        share.zeroize();
         println!("  {} -> {}", holder.id, path.display());
+    }
+
+    if let Some(operator_key_path) = operator_key {
+        let key_bytes = fs::read(operator_key_path)?;
+        let key_bytes: [u8; 32] = key_bytes.try_into().map_err(|_| {
+            format!(
+                "operator key {} must be exactly 32 bytes",
+                operator_key_path.display()
+            )
+        })?;
+        let key_bytes = Zeroizing::new(key_bytes);
+
+        let manifest = Manifest {
+            version: 1,
+            ceremony_id,
+            threshold,
+            total_shares,
+            holders: manifest_holders,
+        };
+        let manifest_bytes = manifest.encode()?;
+        let signature = sign_manifest(&manifest_bytes, &key_bytes)?;
+        let public = operator_public(&key_bytes);
+
+        write_atomic(&manifest_path, &manifest_bytes, force)?;
+        write_atomic(
+            &signature_path,
+            format!("{}\n", hex::encode(signature)).as_bytes(),
+            force,
+        )?;
+        write_atomic(
+            &operator_pub_path,
+            format!("{}\n", hex::encode(public)).as_bytes(),
+            force,
+        )?;
+
+        println!("wrote manifest: {}", manifest_path.display());
+        println!("wrote manifest signature: {}", signature_path.display());
+        println!("wrote operator public key: {}", operator_pub_path.display());
+    } else {
+        println!("no --operator-key supplied; manifest was not generated");
     }
 
     println!("distribute each .share file to the matching holder; never commit the data directory");
 
     Ok(())
+}
+
+fn decode_x25519(id: &str, value: &str) -> Result<[u8; 32], Box<dyn Error>> {
+    let bytes =
+        hex::decode(value).map_err(|error| format!("invalid public key for {id}: {error}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| format!("public key for {id} must be 32 bytes").into())
 }
 
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -187,4 +373,78 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     }
 
     options.open(path)?.write_all(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use signer_holder::{
+        HolderIdentity, decode_operator_public, decode_signature, verify_manifest,
+    };
+
+    #[test]
+    fn init_writes_a_verified_manifest_for_public_bundles() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let holders_path = dir.path().join("holders.json");
+        let operator_key_path = dir.path().join("operator.key");
+
+        let alice = HolderIdentity::generate("alice").unwrap();
+        let bob = HolderIdentity::generate("bob").unwrap();
+        let holders = vec![alice.public_bundle(), bob.public_bundle()];
+        fs::write(&holders_path, serde_json::to_vec(&holders).unwrap()).unwrap();
+
+        let (secret, public) = signer_holder::generate_operator_key().unwrap();
+        fs::write(&operator_key_path, secret).unwrap();
+
+        init(
+            &data_dir,
+            1,
+            2,
+            &holders_path,
+            Some(&operator_key_path),
+            false,
+        )
+        .unwrap();
+
+        let manifest_bytes = fs::read(data_dir.join("manifest.json")).unwrap();
+        let signature =
+            decode_signature(&fs::read_to_string(data_dir.join("manifest.sig")).unwrap()).unwrap();
+        let operator_public =
+            decode_operator_public(&fs::read_to_string(data_dir.join("operator.pub")).unwrap())
+                .unwrap();
+        assert_eq!(operator_public, public);
+
+        let manifest = verify_manifest(&manifest_bytes, &signature, &operator_public).unwrap();
+        assert_eq!(manifest.holders.len(), 2);
+        assert_eq!(manifest.holders[0].id, "alice");
+        assert_eq!(
+            manifest.holders[0].ed25519_public,
+            Some(holders[0].ed25519_public.clone())
+        );
+        assert!(data_dir.join("shares/alice.share").exists());
+        assert!(data_dir.join("shares/bob.share").exists());
+
+        let share_bytes = fs::read(data_dir.join("shares/alice.share")).unwrap();
+        let imported = signer_holder::import_share(
+            &alice,
+            &share_bytes,
+            Some(signer_holder::ManifestPackage {
+                manifest_bytes: &manifest_bytes,
+                signature: &signature,
+                operator_public: &operator_public,
+            }),
+        )
+        .unwrap();
+        assert_eq!(imported.holder_id, "alice");
+        assert_eq!(imported.index, 1);
+        assert_eq!(imported.source, signer_holder::VaultSource::Manifest);
+
+        let vault_path = dir.path().join("alice.vault");
+        let vault_info = imported.seal(&vault_path, "passphrase-1").unwrap();
+        assert_eq!(vault_info.holder_id, "alice");
+        let (opened, share) = signer_holder::ShareVault::open(&vault_path, "passphrase-1").unwrap();
+        assert_eq!(opened.index, 1);
+        assert_eq!(share.as_slice(), imported.share.as_slice());
+    }
 }

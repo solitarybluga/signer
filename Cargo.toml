@@ -4,6 +4,7 @@ members = [
     "crates/proto",
     "crates/core",
     "crates/share",
+    "crates/holder",
     "crates/admin",
     "crates/server",
     "desktop/src-tauri",
@@ -12,6 +13,7 @@ default-members = [
     "crates/proto",
     "crates/core",
     "crates/share",
+    "crates/holder",
     "crates/admin",
     "crates/server",
 ]
@@ -23,9 +25,11 @@ rust-version = "1.85"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+argon2 = "0.5"
 async-trait = "0.1"
 chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["zeroize"] }
 hex = "0.4"
 hkdf = "0.12"
 prost = "0.14"
@@ -49,6 +53,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 tauri = { version = "2", features = [] }
 tauri-build = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 thiserror = "2"

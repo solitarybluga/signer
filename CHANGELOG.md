@@ -25,11 +25,17 @@
 - 桌面客户端支持用持有者私钥解密 `.share` 后提交。
 - 新增 ADR-0005：v0.1 不用 KMS 托管 KEK，保留门限信任模型。
 - 新增 ADR-0006：门限签名采用 per-share 解封，每个 signer 的运维独立。
+- 新增 `signer-holder`：Holder 身份（Ed25519 + X25519）、口令加解密、manifest 验签、share vault 与份额导入。
+- 桌面端集成 Holder 操作：生成身份、导出公开信息、导入/验证 `.share`、加密保存 vault、从 vault 提交解封。
+- `signer-admin` 新增 `operator-keygen`，`init` 支持 `--operator-key` 输出签名的 `manifest.json` / `manifest.sig` / `operator.pub`。
+- `signer-admin init` 的 `holders.json` 兼容桌面端导出的 holder public bundle，并校验 self-signature。
+- 桌面端使用原生文件对话框选择身份、份额和 vault 路径，避免密钥字节经过 JS。
 
 ### 变更
 
 - 完善 README 进度说明与安全报告渠道。
 - 重构为 Cargo workspace：`signer-proto`、`signer-core`、`signer-server` 与桌面端共享依赖和锁文件。
+- 桌面端界面拆分为「操作员」和「份额持有者」两个 tab；份额持有者内部再分为「密钥分发」和「Unseal」两个子 tab，事件日志常驻底部。
 
 ### 安全
 

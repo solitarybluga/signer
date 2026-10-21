@@ -7,4 +7,6 @@
 *.db-shm
 *.db-wal
 *.key
+*.share
+*.vault
 .env

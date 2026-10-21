@@ -28,7 +28,7 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 | KEK 初始化与加密份额分发（signer-admin） | ✅ 已实现 |
 | 门限解封（Shamir 会话、KEK 恢复与校验） | ✅ 核心已实现 |
 | gRPC 解封接口（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal） | ✅ 已实现 |
-| 桌面解封客户端（Tauri） | ✅ 已实现 |
+| 桌面端 Holder 身份、份额 vault 与解封提交（Tauri） | ✅ 已实现 |
 | 加密 keystore（DEK/KEK、Shamir 分享） | 🚧 开发中 |
 | 份额传输加密、持有者签名、VSS | 🚧 计划中 |
 | 密钥管理接口与签名（ECDSA / EdDSA） | 🚧 未开始 |
@@ -75,12 +75,17 @@ cargo run -p signer-admin -- holder-keygen --out holder-1.key
 # 2. 收集公钥到 holders.json
 #    [{"id":"holder-1","public_key":"<hex>"}, ...]
 
-# 3. 生成 KEK、Shamir 分片并加密导出 share 文件
-cargo run -p signer-admin -- init --holders holders.json
+# 3. 生成 operator 签名密钥（可选；桌面端验证 manifest 时需要）
+cargo run -p signer-admin -- operator-keygen --out operator.key --pub-out operator.pub
 
-# 4. 启动服务
+# 4. 生成 KEK、Shamir 分片并加密导出 share 文件
+cargo run -p signer-admin -- init --holders holders.json --operator-key operator.key
+
+# 5. 启动服务
 cargo run -p signer-server
 ```
+
+`holders.json` 既接受旧格式 `{"id": "...", "public_key": "<x25519 hex>"}`，也接受桌面端导出的 holder public bundle（`holder_id`、`x25519_public`、`ed25519_public`、`self_signature`）。提供 `--operator-key` 时，`init` 还会写出 `manifest.json`、`manifest.sig` 和 `operator.pub`，桌面端可据此验证份额来源。
 
 服务端不再自动生成 KEK；缺少 `data/kek_check.json` 会报错并提示先执行 `signer-admin init`。生成的 `data/shares/*.share` 必须交给对应持有者，`data/` 不能提交到仓库。
 
@@ -88,14 +93,14 @@ cargo run -p signer-server
 
 ### 桌面客户端
 
-`desktop/` 下是 Tauri 可视化客户端，用于发起解封会话、提交份额和查看进度：
+`desktop/` 下是 Tauri 可视化客户端，覆盖操作员和份额持有者的流程：
 
 ```bash
 cd desktop/src-tauri
 cargo run
 ```
 
-默认连接 `http://127.0.0.1:50051`。操作员在「会话状态」中发起解封，份额持有者在右侧填入 Session ID、持有者标识，选择自己的私钥和 `.share` 文件。v0.1 的 gRPC 份额传输未加密，仅限本机或可信网络演示。
+默认连接 `http://127.0.0.1:50051`。界面顶部可在「操作员」和「份额持有者」之间切换；持有者 tab 内再分「密钥分发」和「Unseal」：前者生成身份、导出公开信息、导入并验证 `.share`、把份额加密保存为本地 vault，后者用 Session ID 从 vault 解锁提交。manifest 三项（`manifest.json`、`manifest.sig`、`operator.pub`）可选；不提供时按 legacy 方式导入并显示未验签警告。v0.1 的 gRPC 份额传输未加密，仅限本机或可信网络演示。
 
 ## 仓库结构
 
@@ -103,6 +108,7 @@ cargo run
 | --- | --- |
 | `crates/proto` | `signer.v1` proto 与生成的 Rust 代码 |
 | `crates/core` | 存储层与门限解封核心 |
+| `crates/holder` | Holder 身份、manifest 验签、share vault 与份额导入 |
 | `crates/share` | X25519 份额信封加密 |
 | `crates/admin` | KEK 初始化与份额分发工具 |
 | `crates/server` | gRPC 服务与二进制入口 |
