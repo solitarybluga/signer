@@ -24,6 +24,8 @@
 | `unseal` | 解封会话协调与份额验证 |
 | `storage` | `KeyStore` trait 背后的持久化（SQLite / PostgreSQL） |
 | `audit` | 只追加的密钥操作记录 |
+| `signer-admin` | 离线初始化：生成 KEK、分片并导出加密份额 |
+| `share` | X25519 信封加密，供份额分发与客户端解密 |
 | 份额持有者 | 持有 KEK 的 Shamir 份额的外部参与方 |
 
 ### signer

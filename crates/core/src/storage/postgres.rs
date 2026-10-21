@@ -41,7 +41,7 @@ impl PostgresStore {
 
     /// Run the migrations under `migrations/postgres`.
     pub async fn migrate(&self) -> Result<(), StorageError> {
-        sqlx::migrate!("./migrations/postgres")
+        sqlx::migrate!("../../migrations/postgres")
             .run(&self.pool)
             .await
             .map_err(|e| StorageError::Internal(e.to_string()))

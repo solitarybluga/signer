@@ -1,7 +1,10 @@
 /target
 /data
+/desktop/src-tauri/target
+/desktop/src-tauri/gen
 /.idea
 *.db
 *.db-shm
 *.db-wal
+*.key
 .env

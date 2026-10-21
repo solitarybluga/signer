@@ -9,22 +9,61 @@
 | 变量 | 说明 | 必填 |
 | --- | --- | --- |
 | `SIGNER_GRPC_ADDR` | gRPC 监听地址，默认 `127.0.0.1:50051` | 否 |
-| `SIGNER_DATA_DIR` | KEK 校验文件与份额目录，默认 `./data` | 否 |
-| `SIGNER_UNSEAL_THRESHOLD` | 解封阈值，默认 `3` | 否 |
-| `SIGNER_UNSEAL_TOTAL_SHARES` | 份额总数，默认 `5` | 否 |
+| `SIGNER_DATA_DIR` | KEK 校验文件目录，默认 `./data` | 否 |
+| `SIGNER_SESSION_TTL_SECS` | 解封会话有效期（秒），默认 `600` | 否 |
 | `SIGNER_STORAGE_URL` | SQLite 路径或 PostgreSQL URL（待接入） | TODO |
 | `SIGNER_TLS_CERT` / `SIGNER_TLS_KEY` | 服务端证书（计划支持 mTLS） | TODO |
 | `SIGNER_LOG_LEVEL` | 日志级别（待接入） | 否 |
 
 TODO：补充 `.env.example`，启动时校验所有配置。
 
+解封阈值和份额总数由 `signer-admin init` 写入 `kek_check.json`，服务端不再从环境变量读取，避免两边配置漂移。
+
+## 初始化仪式
+
+服务端只读取初始化结果，不会自动生成 KEK。
+
+1. 每个份额持有者在自己的机器上生成密钥对：
+
+   ```bash
+   cargo run -p signer-admin -- holder-keygen --out holder-1.key
+   ```
+
+   `holder-1.key` 是 32 字节 X25519 私钥；私钥文件留在持有者手中，把输出的公钥交给操作员。
+
+2. 操作员将公钥写入 `holders.json`：
+
+   ```json
+   [
+     { "id": "holder-1", "public_key": "<hex>" },
+     { "id": "holder-2", "public_key": "<hex>" }
+   ]
+   ```
+
+   条目数量必须等于 `total_shares`。
+
+3. 生成 KEK、分片并导出加密份额：
+
+   ```bash
+   cargo run -p signer-admin -- init --threshold 3 --total-shares 5 --holders holders.json
+   ```
+
+   输出 `data/kek_check.json` 和 `data/shares/<holder-id>.share`。每个 `.share` 都是 X25519 信封加密的，只有对应持有者的私钥能解开。
+
+4. 通过离线或安全渠道把每个 `.share` 发给对应持有者；不要和 KEK 校验文件、持有者私钥放在同一处。
+
+5. 启动 signer。缺少 `kek_check.json` 会拒绝启动。
+
+已有初始化时 `init` 默认拒绝覆盖；`--force` 会删除旧 shares 目录并重新生成，旧份额随即失效。
+
 ## 部署
 
 ### 单机
 
-1. 以 sealed 状态启动 signer。
-2. 与份额持有者完成解封仪式。
-3. 验证 `GetPublicKey` 与一次测试签名。
+1. 完成初始化仪式，生成 KEK 校验文件和加密份额。
+2. 以 sealed 状态启动 signer。
+3. 与份额持有者完成解封仪式。
+4. 验证 `GetPublicKey` 与一次测试签名。
 
 ### 高可用
 

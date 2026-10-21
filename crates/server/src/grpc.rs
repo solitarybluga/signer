@@ -5,11 +5,8 @@ use time::OffsetDateTime;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use crate::unseal::{SessionState, UnsealError, UnsealManager};
-
-pub mod pb {
-    tonic::include_proto!("signer.v1");
-}
+use signer_core::unseal::{SessionState, UnsealError, UnsealManager};
+use signer_proto::pb;
 
 use pb::{
     CreateKeyRequest, CreateKeyResponse, GetPublicKeyRequest, GetPublicKeyResponse,
@@ -187,7 +184,7 @@ fn map_unseal_error(error: UnsealError) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::unseal::{UnsealConfig, UnsealManager};
+    use signer_core::unseal::{UnsealConfig, UnsealManager};
 
     #[tokio::test]
     async fn unseal_rpcs_work_end_to_end() {

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Signer Unseal</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <div class="logo">S</div>
+        <div>
+          <h1>Signer Unseal</h1>
+          <p>门限解封控制台</p>
+        </div>
+      </div>
+      <label class="server-field">
+        <span>gRPC 地址</span>
+        <input id="server" value="http://127.0.0.1:50051" spellcheck="false" />
+      </label>
+    </header>
+
+    <main>
+      <section class="card">
+        <div class="card-head">
+          <h2>会话状态</h2>
+          <span id="state-badge" class="badge" data-state="sealed">sealed</span>
+        </div>
+
+        <div class="progress" aria-hidden="true">
+          <div id="progress-bar"></div>
+        </div>
+
+        <div class="stats">
+          <div>
+            <strong id="collected">0</strong>
+            <span>已收集份额</span>
+          </div>
+          <div>
+            <strong id="threshold">–</strong>
+            <span>解封阈值</span>
+          </div>
+        </div>
+
+        <dl class="meta">
+          <div>
+            <dt>Session ID</dt>
+            <dd id="session-id">—</dd>
+            <button id="copy-session" class="link" type="button">复制</button>
+          </div>
+          <div>
+            <dt>Nonce</dt>
+            <dd id="nonce" class="mono">—</dd>
+          </div>
+          <div>
+            <dt>过期时间</dt>
+            <dd id="expires">—</dd>
+          </div>
+        </dl>
+
+        <div class="actions">
+          <button id="start-btn" class="primary" type="button">发起解封会话</button>
+          <button id="seal-btn" class="ghost" type="button">重新封存</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>份额持有者</h2>
+          <span class="hint">上传你的 share 文件</span>
+        </div>
+
+        <label class="field">
+          <span>Session ID</span>
+          <input id="holder-session" placeholder="粘贴操作员发来的 Session ID" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>持有者标识</span>
+          <input id="holder-id" placeholder="例如 holder-1" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>持有者私钥</span>
+          <input id="holder-secret" type="file" accept=".key,application/octet-stream" />
+        </label>
+        <label class="field">
+          <span>加密份额文件</span>
+          <input id="share-file" type="file" accept=".share,application/octet-stream" />
+        </label>
+
+        <button id="submit-btn" class="primary" type="button">解密并提交份额</button>
+        <p class="note">
+          由 <code>signer-admin init</code> 生成的 <code>.share</code> 文件需要配合你的
+          私钥解密。v0.1 通过本机 gRPC 明文传输解密后的份额，请只在可信环境使用。
+        </p>
+      </section>
+
+      <section class="card log-card">
+        <div class="card-head">
+          <h2>事件</h2>
+          <button id="clear-log" class="link" type="button">清空</button>
+        </div>
+        <ul id="log"></ul>
+      </section>
+    </main>
+
+    <footer>signer v0.1 · 本地演示客户端 · 未经安全审计</footer>
+    <script src="app.js"></script>
+  </body>
+</html>

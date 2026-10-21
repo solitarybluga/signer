@@ -5,9 +5,10 @@
 - [ ] secp256k1 + ECDSA 与 edwards25519 + EdDSA 密钥生成
 - [ ] 导入已有私钥（secp256k1 标量 / edwards25519 种子）
 - [ ] 每密钥 DEK + KEK 信封加密（XChaCha20-Poly1305）
+- [x] KEK 生成与加密 share 文件分发（signer-admin）
 - [x] Shamir 分片与 KEK 校验
 - [x] 解封会话、份额收集与 KEK 恢复（核心）
-- [ ] 份额传输加密、持有者签名与 VSS 校验
+- [ ] 持有者签名与 VSS 校验；gRPC 份额传输加密
 - [x] 通过 gRPC 接入启动解封流程
 - [ ] gRPC 接口：`CreateKey`、`GetPublicKey`、`ListKeys`、`Sign`、`StartUnseal`、`SubmitUnsealShare`、`GetUnsealStatus`、`Seal`
 - [ ] 审计日志
@@ -28,6 +29,7 @@
 - [ ] Ed25519 的 FROST 门限签名（Solana）
 - [ ] secp256k1 的 CGGMP21 门限 ECDSA（EVM）
 - [ ] 跨独立 signer 实例的签名会话协调
+- [ ] 每个 signer 的 per-share 解封与独立运维密钥（ADR-0006）
 - [ ] 从签名路径中移除明文私钥重组
 
 ## v1.0 — 稳定版

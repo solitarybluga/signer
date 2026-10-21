@@ -11,6 +11,7 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::RngCore;
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 use sharks::{Share, Sharks};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
@@ -72,6 +73,35 @@ impl KekCheck {
 
     pub fn ciphertext(&self) -> &[u8] {
         &self.ciphertext
+    }
+}
+
+/// Persisted KEK check and the quorum parameters it was created with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KekCheckFile {
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub threshold: u8,
+    pub total_shares: u8,
+}
+
+impl KekCheckFile {
+    pub fn from_check(check: &KekCheck, threshold: u8, total_shares: u8) -> Self {
+        Self {
+            nonce: check.nonce.to_vec(),
+            ciphertext: check.ciphertext.clone(),
+            threshold,
+            total_shares,
+        }
+    }
+
+    pub fn into_parts(self) -> Result<(KekCheck, u8, u8), UnsealError> {
+        let nonce: [u8; CHECK_NONCE_LEN] = self
+            .nonce
+            .try_into()
+            .map_err(|_| UnsealError::InvalidConfig("invalid KEK check nonce length"))?;
+        let check = KekCheck::from_parts(nonce, self.ciphertext)?;
+        Ok((check, self.threshold, self.total_shares))
     }
 }
 
@@ -460,9 +490,52 @@ fn verify_check(kek: &[u8; KEK_LEN], check: &KekCheck) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signer_share::{HolderKeypair, decrypt_share, encrypt_share};
 
     fn manager() -> (UnsealManager, Vec<Vec<u8>>) {
         UnsealManager::bootstrap(UnsealConfig::new(2, 3)).unwrap()
+    }
+
+    #[test]
+    fn kek_check_file_roundtrip() {
+        let (manager, _) = manager();
+        let check = manager.check();
+        let file = KekCheckFile::from_check(&check, 2, 3);
+        let encoded = serde_json::to_vec(&file).unwrap();
+        let decoded: KekCheckFile = serde_json::from_slice(&encoded).unwrap();
+        let (decoded_check, threshold, total_shares) = decoded.into_parts().unwrap();
+
+        assert_eq!(threshold, 2);
+        assert_eq!(total_shares, 3);
+        assert_eq!(decoded_check.ciphertext(), check.ciphertext());
+    }
+
+    #[test]
+    fn encrypted_share_envelopes_unseal() {
+        let config = UnsealConfig::new(2, 3);
+        let (manager, shares) = UnsealManager::bootstrap(config.clone()).unwrap();
+        let check = manager.check();
+        let holders: Vec<HolderKeypair> = (0..shares.len())
+            .map(|_| HolderKeypair::generate())
+            .collect();
+
+        let envelopes: Vec<Vec<u8>> = shares
+            .iter()
+            .zip(&holders)
+            .map(|(share, holder)| encrypt_share(holder.public_bytes(), share).unwrap())
+            .collect();
+
+        let manager = UnsealManager::from_check(config, check).unwrap();
+        let session = manager.start_session().unwrap();
+
+        for (index, holder) in holders.iter().take(2).enumerate() {
+            let share = decrypt_share(holder.secret_bytes(), &envelopes[index]).unwrap();
+            manager
+                .submit_share(session.id, &format!("holder-{index}"), share.as_slice())
+                .unwrap();
+        }
+
+        assert!(manager.is_unsealed());
     }
 
     #[test]

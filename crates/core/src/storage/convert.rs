@@ -1,11 +1,10 @@
 use std::collections::BTreeMap;
 
-use sqlx::error::DatabaseError;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-use super::model::{AuditResult, Curve, KeyState, SignatureAlgorithm, UnsealState};
+use super::model::{Curve, KeyState, SignatureAlgorithm, UnsealState};
 use super::store::StorageError;
 
 pub(crate) fn parse_curve(value: &str) -> Result<Curve, StorageError> {
@@ -25,11 +24,6 @@ pub(crate) fn parse_key_state(value: &str) -> Result<KeyState, StorageError> {
 pub(crate) fn parse_unseal_state(value: &str) -> Result<UnsealState, StorageError> {
     UnsealState::parse(value)
         .ok_or_else(|| StorageError::Corrupt(format!("unknown unseal state: {value}")))
-}
-
-pub(crate) fn parse_audit_result(value: &str) -> Result<AuditResult, StorageError> {
-    AuditResult::parse(value)
-        .ok_or_else(|| StorageError::Corrupt(format!("unknown audit result: {value}")))
 }
 
 pub(crate) fn parse_uuid(value: &str) -> Result<Uuid, StorageError> {

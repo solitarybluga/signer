@@ -19,10 +19,17 @@
 - 新增 GitHub Actions CI（fmt、clippy、test）。
 - 实现门限解封核心：Shamir 分片、解封会话、KEK 校验与重新封存。
 - 将解封接口接入 gRPC（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal），新增服务启动流程与数据目录初始化。
+- 新增 Tauri 桌面解封客户端（`desktop/`）：发起会话、提交份额、进度展示与重新封存。
+- 新增 `signer-admin`：X25519 持有者密钥生成、KEK 初始化、加密份额导出。
+- 服务端改为读取 `signer-admin` 生成的 KEK 校验文件，不再自动生成份额。
+- 桌面客户端支持用持有者私钥解密 `.share` 后提交。
+- 新增 ADR-0005：v0.1 不用 KMS 托管 KEK，保留门限信任模型。
+- 新增 ADR-0006：门限签名采用 per-share 解封，每个 signer 的运维独立。
 
 ### 变更
 
 - 完善 README 进度说明与安全报告渠道。
+- 重构为 Cargo workspace：`signer-proto`、`signer-core`、`signer-server` 与桌面端共享依赖和锁文件。
 
 ### 安全
 

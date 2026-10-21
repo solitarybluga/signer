@@ -1,7 +1,7 @@
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("cargo:rerun-if-changed=proto/signer/v1/signer.proto");
+    println!("cargo:rerun-if-changed=../../proto/signer/v1/signer.proto");
 
     let include_path = protoc_bin_vendored::include_path()?;
 
@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&["proto/signer/v1/signer.proto"], &["proto"])?;
+        .compile_protos(&["../../proto/signer/v1/signer.proto"], &["../../proto"])?;
 
     Ok(())
 }

@@ -1,0 +1,19 @@
+[package]
+name = "signer-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Desktop client for the signer quorum unsealing flow"
+
+[dependencies]
+hex.workspace = true
+serde.workspace = true
+signer-proto = { path = "../../crates/proto" }
+signer-share = { path = "../../crates/share" }
+tauri.workspace = true
+tonic.workspace = true
+zeroize.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true

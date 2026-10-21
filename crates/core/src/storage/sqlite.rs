@@ -1,11 +1,9 @@
-use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use super::convert::{
     format_labels, format_time, map_sqlx_error, parse_curve, parse_key_state, parse_labels,
@@ -52,7 +50,7 @@ impl SqliteStore {
 
     /// Run the migrations under `migrations/sqlite`.
     pub async fn migrate(&self) -> Result<(), StorageError> {
-        sqlx::migrate!("./migrations/sqlite")
+        sqlx::migrate!("../../migrations/sqlite")
             .run(&self.pool)
             .await
             .map_err(|e| StorageError::Internal(e.to_string()))
@@ -361,6 +359,8 @@ impl KeyStore for SqliteStore {
 mod tests {
     use super::*;
     use crate::storage::model::{AuditResult, UnsealState};
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
 
     fn test_key() -> NewKey {
         let mut labels = BTreeMap::new();

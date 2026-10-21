@@ -25,8 +25,10 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 | 模块 | 状态 |
 | --- | --- |
 | 存储模型、迁移、SQLite / PostgreSQL 实现 | ✅ 已实现，含测试 |
+| KEK 初始化与加密份额分发（signer-admin） | ✅ 已实现 |
 | 门限解封（Shamir 会话、KEK 恢复与校验） | ✅ 核心已实现 |
 | gRPC 解封接口（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal） | ✅ 已实现 |
+| 桌面解封客户端（Tauri） | ✅ 已实现 |
 | 加密 keystore（DEK/KEK、Shamir 分享） | 🚧 开发中 |
 | 份额传输加密、持有者签名、VSS | 🚧 计划中 |
 | 密钥管理接口与签名（ECDSA / EdDSA） | 🚧 未开始 |
@@ -37,6 +39,7 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 
 - 加密存储：每密钥独立 DEK，KEK 信封包裹（XChaCha20-Poly1305）
 - 支持导入已有私钥（secp256k1 标量 / edwards25519 种子）
+- 份额分发：对 Shamir 份额做 X25519 信封加密，每个持有者用本地私钥解密
 - 门限解封：对密钥加密密钥做 Shamir 秘密分享，解封时用 KEK 校验密文验证重建结果（VSS 待补）
 - 签名：secp256k1 + ECDSA（EVM）与 edwards25519 + EdDSA（Solana）
 - gRPC 解封接口（tonic）：StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal
@@ -63,14 +66,50 @@ flowchart LR
 
 前置：Rust 1.85+、Docker（运行测试时）。protoc 已由 `protoc-bin-vendored` 随构建提供。
 
+先完成一次初始化仪式：
+
 ```bash
-cargo test
+# 1. 每个份额持有者生成自己的 X25519 密钥（在各自机器上执行）
+cargo run -p signer-admin -- holder-keygen --out holder-1.key
+
+# 2. 收集公钥到 holders.json
+#    [{"id":"holder-1","public_key":"<hex>"}, ...]
+
+# 3. 生成 KEK、Shamir 分片并加密导出 share 文件
+cargo run -p signer-admin -- init --holders holders.json
+
+# 4. 启动服务
+cargo run -p signer-server
+```
+
+服务端不再自动生成 KEK；缺少 `data/kek_check.json` 会报错并提示先执行 `signer-admin init`。生成的 `data/shares/*.share` 必须交给对应持有者，`data/` 不能提交到仓库。
+
+可用环境变量：`SIGNER_GRPC_ADDR`、`SIGNER_DATA_DIR`、`SIGNER_SESSION_TTL_SECS`。
+
+### 桌面客户端
+
+`desktop/` 下是 Tauri 可视化客户端，用于发起解封会话、提交份额和查看进度：
+
+```bash
+cd desktop/src-tauri
 cargo run
 ```
 
-首次启动会在 `data/` 下生成 KEK 校验文件和 5 份份额（默认 3-of-5），并把解封 gRPC 服务监听在 `127.0.0.1:50051`。份额文件必须离线分发给持有者，不能提交到仓库。
+默认连接 `http://127.0.0.1:50051`。操作员在「会话状态」中发起解封，份额持有者在右侧填入 Session ID、持有者标识，选择自己的私钥和 `.share` 文件。v0.1 的 gRPC 份额传输未加密，仅限本机或可信网络演示。
 
-可用环境变量：`SIGNER_GRPC_ADDR`、`SIGNER_DATA_DIR`、`SIGNER_UNSEAL_THRESHOLD`、`SIGNER_UNSEAL_TOTAL_SHARES`。
+## 仓库结构
+
+| 路径 | 说明 |
+| --- | --- |
+| `crates/proto` | `signer.v1` proto 与生成的 Rust 代码 |
+| `crates/core` | 存储层与门限解封核心 |
+| `crates/share` | X25519 份额信封加密 |
+| `crates/admin` | KEK 初始化与份额分发工具 |
+| `crates/server` | gRPC 服务与二进制入口 |
+| `desktop` | Tauri 桌面解封客户端 |
+| `migrations` | PostgreSQL / SQLite 迁移 |
+| `proto` | protobuf 源文件 |
+| `docs` | 设计与运维文档 |
 
 ## API
 
@@ -103,6 +142,7 @@ gRPC 定义见 [`proto/signer/v1/signer.proto`](proto/signer/v1/signer.proto)。
 | [docs/unseal-protocol.md](docs/unseal-protocol.md) | 门限解封协议 |
 | [docs/storage.md](docs/storage.md) | 存储 trait、表结构、HA |
 | [docs/operations.md](docs/operations.md) | 配置、可观测性、运维手册 |
+| [desktop/README.md](desktop/README.md) | Tauri 桌面客户端 |
 | [docs/adr/](docs/adr/) | 架构决策记录 |
 | [ROADMAP.md](ROADMAP.md) | 里程碑计划 |
 | [CHANGELOG.md](CHANGELOG.md) | 版本变更记录 |
