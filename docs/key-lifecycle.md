@@ -1,6 +1,6 @@
 # 密钥生命周期
 
-> 状态：部分实现。Ed25519 的 CreateKey / GetPublicKey / ListKeys / Sign、DEK/KEK 信封、SQLite/PostgreSQL 存储和 CreateKey/Sign 审计已实现；密钥创建后直接进入 `活跃` 状态。ImportKey（等待 mTLS）、secp256k1/ECDSA、Get/List 审计、unseal 审计、轮换与销毁仍待实现。
+> 状态：部分实现。Ed25519 与 secp256k1 的 CreateKey / GetPublicKey / ListKeys / Sign、DEK/KEK 信封、SQLite/PostgreSQL 存储和 CreateKey/Sign 审计已实现；密钥创建后直接进入 `活跃` 状态。ImportKey（等待 mTLS）、Get/List 审计、unseal 审计、轮换与销毁仍待实现。
 
 > 实现位置：`crates/core/src/keystore.rs`。
 
@@ -54,6 +54,8 @@ TODO：如果份额按密钥单独生成，补充份额生成仪式流程。
 ## 签名
 
 - 要求密钥处于 `活跃` 状态，且服务已解封。
+- EdDSA 对原始 payload 签名，返回 64 字节签名。
+- ECDSA 要求 payload 是 32 字节摘要，使用 RFC 6979 确定性 nonce 和 low-s 规范化，返回 65 字节 `r || s || v`，其中 `v` 为 27 或 28。
 - 每次签名时用 KEK 解包其 DEK，再用 DEK 解密私钥；当前不做 DEK 缓存，解包与解密后的材料只存在于内存。
 - 签名过程不得把明文密钥写到任何地方。
 - 每次签名请求都写审计（密钥 ID、调用方、结果、`request_id`、`payload_len`——不记录载荷内容）。Sign 审计提交成功后才返回签名；GetPublicKey / ListKeys 和 unseal 操作尚未审计。

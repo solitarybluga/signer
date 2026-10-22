@@ -24,13 +24,13 @@ KEK（32 字节随机密钥）
   └── 解封后驻留 signer 进程内存
 
 私钥
-  └── 用每密钥独立的 DEK 以 XChaCha20-Poly1305 加密（Ed25519 已实现；secp256k1 设计）
-        └── DEK 再用 KEK 包裹（Ed25519 已实现；secp256k1 设计）
+  └── 用每密钥独立的 DEK 以 XChaCha20-Poly1305 加密（Ed25519 / secp256k1 已实现）
+        └── DEK 再用 KEK 包裹（Ed25519 / secp256k1 已实现）
 ```
 
 达到阈值后，signer 在内存中重建完整 KEK，之后可以解开 DEK 和私钥。因此本项目的安全边界是“门限解封”，不是“私钥永不重组”的门限签名（FROST / CGGMP21 在 v0.3 路线图中）。
 
-当前真正落地的是 **KEK 的 VSS 分片、分发、提交、校验和恢复**，以及 **Ed25519 的 DEK/KEK 信封 keystore**（CreateKey / GetPublicKey / ListKeys / Sign）。secp256k1/ECDSA 和 ImportKey 仍在开发中，文中会明确标注“计划”或“设计”。
+当前真正落地的是 **KEK 的 VSS 分片、分发、提交、校验和恢复**，以及 **Ed25519 / secp256k1 的 DEK/KEK 信封 keystore**（CreateKey / GetPublicKey / ListKeys / Sign）。ImportKey 仍在开发中，文中会明确标注“计划”或“设计”。
 
 ### 0.2 技术清单
 
@@ -43,12 +43,12 @@ KEK（32 字节随机密钥）
 | HKDF-SHA256 | 从 ECDH 共享秘密派生 AEAD 密钥 | ✅ | `crates/share/src/lib.rs` |
 | XChaCha20-Poly1305 | 份额、身份文件、vault、KEK check、私钥/DEK 信封的 AEAD | ✅ | `crates/share`、`crates/holder`、`crates/core` |
 | Argon2id | 口令派生身份/vault 加密密钥 | ✅ | `crates/holder/src/file.rs` |
-| DEK/KEK 信封 | 每密钥独立 DEK，私钥用 DEK 加密、DEK 用 KEK 包裹 | ✅ Ed25519；secp256k1 待实现 | `crates/core/src/keystore.rs` |
+| DEK/KEK 信封 | 每密钥独立 DEK，私钥用 DEK 加密、DEK 用 KEK 包裹 | ✅ Ed25519 / secp256k1 | `crates/core/src/keystore.rs` |
 | Ristretto255 | Feldman VSS 的素数阶群 | ✅ | `crates/vss/src/lib.rs` |
 | Feldman VSS | KEK 的可验证秘密分享 | ✅ | `crates/vss/src/lib.rs` |
 | Shamir GF(256) | 旧版份额分享（`sharks`） | 🕘 | 已移除依赖 |
 | Lagrange 插值 | 从 t 份份额恢复 KEK | ✅ | `crates/vss/src/lib.rs` |
-| secp256k1 + ECDSA | EVM 业务签名 | 🚧 | 尚未实现 |
+| secp256k1 + ECDSA | EVM 业务签名 | ✅ | `crates/core/src/keystore.rs` |
 | EdDSA 业务签名 | Solana 业务签名 | ✅ Ed25519 | `crates/core/src/keystore.rs` |
 | FROST | 门限 Ed25519 签名 | 🚧 | v0.3 |
 | CGGMP21 | 门限 ECDSA 签名 | 🚧 | v0.3 |
@@ -575,7 +575,7 @@ s = f(0) = Σ_i y_i · λ_i
 - 长度前缀（`u8` / `u16_le`）避免字段拼接歧义，例如 `"ab" + "c"` 和 `"a" + "bc"` 不会得到相同 transcript。
 - v2 提交同时绑定 AEAD AAD 和 Ed25519 签名输入；只改其中一个都会失败。
 
-## 13. secp256k1 + ECDSA（🚧 计划）
+## 13. secp256k1 + ECDSA（✅）
 
 ### 原理
 
@@ -587,16 +587,18 @@ secp256k1 是 Bitcoin/EVM 使用的短 Weierstrass 曲线。ECDSA 签名基于�
 - 签名 nonce `k` 必须不可预测且不能重用，否则会泄露私钥；生产实现应使用 RFC 6979 确定性 nonce 或强随机 nonce；
 - 需要对 `s` 做 low-s 规范化，避免签名可延展。
 
-### 计划中的使用
+### 系统中的使用
 
 - 作为 keystore 支持的 EVM 密钥类型；
-- `CreateKey` 生成 secp256k1 私钥，用 DEK 加密；
-- `Sign` 对调用方提供的 32 字节摘要做 ECDSA；
-- gRPC `SignResponse` 计划返回 65 字节 `r || s || v`（具体格式以实现为准）。
+- `CreateKey` 生成 secp256k1 私钥标量，用 DEK 加密、KEK 包裹；
+- 公钥使用 33 字节压缩 SEC1 编码；
+- `Sign` 接收调用方提供的 32 字节摘要，使用 RFC 6979 确定性 nonce，做 low-s 规范化；
+- 返回 65 字节 `r || s || v`，`v` 为 27 或 28；
+- 签名后立即 zeroize 私钥标量和 DEK。
 
 ### 状态
 
-🚧 secp256k1/ECDSA 尚未实现。当前 `CreateKey` 对 edwards25519/EdDSA 已可用，secp256k1/ECDSA 返回 `UNIMPLEMENTED`；`ImportKey` 仍未实现。
+✅ 已实现 `CreateKey`、`GetPublicKey`、`ListKeys`、`Sign`；`ImportKey` 和密钥轮换仍待实现。
 
 ## 14. EdDSA 业务签名（✅ Ed25519）
 
@@ -715,6 +717,7 @@ ADR-0005 明确 v0.1 不用 KMS 托管 KEK，以保持门限信任模型：如�
 | `curve25519-dalek` 4 | Ristretto255、Scalar、点运算 | ✅ |
 | `ed25519-dalek` 2 | Ed25519 签名/验签 | ✅ |
 | `x25519-dalek` 2 | X25519 ECDH、静态密钥 | ✅ |
+| `k256` 0.13 | secp256k1、ECDSA、RFC 6979 签名 | ✅ |
 | `chacha20poly1305` 0.10 | XChaCha20-Poly1305 AEAD | ✅ |
 | `hkdf` 0.12 + `sha2` 0.10 | HKDF-SHA256 和 SHA-256 | ✅ |
 | `argon2` 0.5 | Argon2id 口令 KDF | ✅ |

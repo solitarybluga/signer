@@ -1,6 +1,6 @@
 # 架构
 
-> 状态：草稿——反映 v0.1 设计。存储、解封、Ed25519 keystore 和 CreateKey/Sign 审计已实现；secp256k1、ImportKey、其余操作审计与 mTLS 仍在开发中。
+> 状态：草稿——反映 v0.1 设计。存储、解封、Ed25519/secp256k1 keystore 和 CreateKey/Sign 审计已实现；ImportKey、其余操作审计与 mTLS 仍在开发中。
 
 ## 目标
 

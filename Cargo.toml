@@ -35,6 +35,7 @@ curve25519-dalek = { version = "4", features = ["zeroize"] }
 ed25519-dalek = { version = "2", features = ["zeroize"] }
 hex = "0.4"
 hkdf = "0.12"
+k256 = { version = "0.13", features = ["ecdsa"] }
 prost = "0.14"
 prost-types = "0.14"
 protoc-bin-vendored = "3"

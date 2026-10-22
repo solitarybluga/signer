@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signer as Ed25519Signer, SigningKey as Ed25519SigningKey};
+use k256::ecdsa::SigningKey as EcdsaSigningKey;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use thiserror::Error;
@@ -24,7 +25,7 @@ use crate::unseal::{UnsealError, UnsealManager};
 
 const DEK_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
-const ED25519_SEED_LEN: usize = 32;
+const PRIVATE_KEY_LEN: usize = 32;
 const PRIVATE_AAD_DOMAIN: &[u8] = b"signer.key.private.v1";
 const DEK_AAD_DOMAIN: &[u8] = b"signer.key.dek.v1";
 
@@ -43,14 +44,14 @@ pub enum KeystoreError {
     #[error("key is not active")]
     KeyNotActive,
 
-    #[error("unsupported curve/algorithm: {0}")]
-    Unsupported(String),
-
     #[error("invalid curve/algorithm pair")]
     InvalidAlgorithmPair,
 
     #[error("invalid key material")]
     InvalidMaterial,
+
+    #[error("ECDSA payload must be a 32-byte digest")]
+    InvalidPayload,
 
     #[error("stored key is corrupt")]
     Corrupt,
@@ -86,7 +87,7 @@ impl Keystore {
         Self { store, unseal }
     }
 
-    /// Generate an Ed25519 key, encrypt it, and persist it.
+    /// Generate an Ed25519 or secp256k1 key, encrypt it, and persist it.
     ///
     /// The key is created directly in `Active` state. There is no activation
     /// RPC in v0.1; approval workflows can be added later.
@@ -97,29 +98,26 @@ impl Keystore {
         labels: BTreeMap<String, String>,
         actor: &str,
     ) -> Result<KeyMetadata, KeystoreError> {
-        if let Err(error) = ensure_ed25519(curve, algorithm) {
-            let _ = self
-                .audit(
-                    actor,
-                    "CreateKey",
-                    None,
-                    AuditResult::Denied,
-                    failure_metadata("unsupported_algorithm"),
-                )
-                .await;
-            return Err(error);
-        }
+        let (private_key, public_key) = match generate_key(curve, algorithm) {
+            Ok(key) => key,
+            Err(error) => {
+                let _ = self
+                    .audit(
+                        actor,
+                        "CreateKey",
+                        None,
+                        AuditResult::Denied,
+                        failure_metadata("unsupported_algorithm"),
+                    )
+                    .await;
+                return Err(error);
+            }
+        };
 
         let id = Uuid::new_v4();
-        let mut seed = Zeroizing::new([0u8; ED25519_SEED_LEN]);
-        OsRng.fill_bytes(&mut seed[..]);
-        let signing_key = SigningKey::from_bytes(&seed);
-        let public_key = signing_key.verifying_key().to_bytes().to_vec();
-
-        let encrypted = match self
-            .unseal
-            .with_kek(|kek| encrypt_ed25519(kek, id, curve, algorithm, &public_key, &seed[..]))
-        {
+        let encrypted = match self.unseal.with_kek(|kek| {
+            encrypt_key_material(kek, id, curve, algorithm, &public_key, &private_key[..])
+        }) {
             Ok(Ok(encrypted)) => encrypted,
             Ok(Err(error)) => {
                 let _ = self
@@ -201,7 +199,7 @@ impl Keystore {
         Ok(self.store.list_keys(page).await?)
     }
 
-    /// Sign a raw message with an active Ed25519 key.
+    /// Sign with an active Ed25519 key or secp256k1 ECDSA key.
     pub async fn sign(
         &self,
         id: KeyId,
@@ -249,7 +247,7 @@ impl Keystore {
                 .await;
             return Err(KeystoreError::KeyNotActive);
         }
-        if let Err(error) = ensure_ed25519(record.curve, record.algorithm) {
+        if let Err(error) = ensure_supported(record.curve, record.algorithm) {
             let _ = self
                 .audit(
                     actor,
@@ -266,9 +264,29 @@ impl Keystore {
                 .await;
             return Err(error);
         }
+        if record.algorithm == SignatureAlgorithm::Ecdsa && payload.len() != 32 {
+            let _ = self
+                .audit(
+                    actor,
+                    "Sign",
+                    Some(id),
+                    AuditResult::Denied,
+                    sign_failure_metadata(
+                        Some(&record),
+                        payload.len(),
+                        request_id,
+                        "invalid_payload",
+                    ),
+                )
+                .await;
+            return Err(KeystoreError::InvalidPayload);
+        }
 
-        let seed = match self.unseal.with_kek(|kek| decrypt_ed25519(kek, &record)) {
-            Ok(Ok(seed)) => seed,
+        let private_key = match self
+            .unseal
+            .with_kek(|kek| decrypt_key_material(kek, &record))
+        {
+            Ok(Ok(private_key)) => private_key,
             Ok(Err(error)) => {
                 let _ = self
                     .audit(
@@ -300,8 +318,35 @@ impl Keystore {
             }
         };
 
-        let signing_key = SigningKey::from_bytes(&seed);
-        let signature = signing_key.sign(payload).to_bytes().to_vec();
+        let signature = match (record.curve, record.algorithm) {
+            (Curve::Edwards25519, SignatureAlgorithm::EdDsa) => {
+                let signing_key = Ed25519SigningKey::from_bytes(&private_key);
+                signing_key.sign(payload).to_bytes().to_vec()
+            }
+            (Curve::Secp256k1, SignatureAlgorithm::Ecdsa) => {
+                match sign_ecdsa(&private_key, payload) {
+                    Ok(signature) => signature,
+                    Err(error) => {
+                        let _ = self
+                            .audit(
+                                actor,
+                                "Sign",
+                                Some(id),
+                                AuditResult::Error,
+                                sign_failure_metadata(
+                                    Some(&record),
+                                    payload.len(),
+                                    request_id,
+                                    "ecdsa_sign_failed",
+                                ),
+                            )
+                            .await;
+                        return Err(error);
+                    }
+                }
+            }
+            _ => return Err(KeystoreError::InvalidAlgorithmPair),
+        };
 
         // Signing is in-memory; the audit insert is the commit point. If it
         // fails, the signature is not returned to the caller.
@@ -391,15 +436,15 @@ struct EncryptedKey {
     dek_nonce: Vec<u8>,
 }
 
-fn encrypt_ed25519(
+fn encrypt_key_material(
     kek: &[u8; 32],
     id: KeyId,
     curve: Curve,
     algorithm: SignatureAlgorithm,
     public_key: &[u8],
-    seed: &[u8],
+    private_key: &[u8],
 ) -> Result<EncryptedKey, KeystoreError> {
-    if seed.len() != ED25519_SEED_LEN {
+    if private_key.len() != PRIVATE_KEY_LEN {
         return Err(KeystoreError::InvalidMaterial);
     }
 
@@ -418,7 +463,7 @@ fn encrypt_ed25519(
         .encrypt(
             XNonce::from_slice(&nonce),
             Payload {
-                msg: seed,
+                msg: private_key,
                 aad: &private_aad,
             },
         )
@@ -445,10 +490,10 @@ fn encrypt_ed25519(
     })
 }
 
-fn decrypt_ed25519(
+fn decrypt_key_material(
     kek: &[u8; 32],
     record: &KeyRecord,
-) -> Result<Zeroizing<[u8; ED25519_SEED_LEN]>, KeystoreError> {
+) -> Result<Zeroizing<[u8; PRIVATE_KEY_LEN]>, KeystoreError> {
     if record.nonce.len() != NONCE_LEN || record.dek_nonce.len() != NONCE_LEN {
         return Err(KeystoreError::Corrupt);
     }
@@ -479,7 +524,7 @@ fn decrypt_ed25519(
 
     let private_cipher =
         XChaCha20Poly1305::new_from_slice(&dek[..]).map_err(|_| KeystoreError::Internal)?;
-    let seed = private_cipher
+    let private_key = private_cipher
         .decrypt(
             XNonce::from_slice(&record.nonce),
             Payload {
@@ -488,23 +533,87 @@ fn decrypt_ed25519(
             },
         )
         .map_err(|_| KeystoreError::Corrupt)?;
-    let seed = Zeroizing::new(seed);
-    let seed: [u8; ED25519_SEED_LEN] = seed
+    let private_key = Zeroizing::new(private_key);
+    let private_key: [u8; PRIVATE_KEY_LEN] = private_key
         .as_slice()
         .try_into()
         .map_err(|_| KeystoreError::Corrupt)?;
 
-    Ok(Zeroizing::new(seed))
+    Ok(Zeroizing::new(private_key))
 }
 
-fn ensure_ed25519(curve: Curve, algorithm: SignatureAlgorithm) -> Result<(), KeystoreError> {
+fn ensure_supported(curve: Curve, algorithm: SignatureAlgorithm) -> Result<(), KeystoreError> {
     match (curve, algorithm) {
-        (Curve::Edwards25519, SignatureAlgorithm::EdDsa) => Ok(()),
-        (Curve::Secp256k1, SignatureAlgorithm::Ecdsa) => Err(KeystoreError::Unsupported(
-            "secp256k1/ECDSA is not implemented yet".to_string(),
-        )),
+        (Curve::Edwards25519, SignatureAlgorithm::EdDsa)
+        | (Curve::Secp256k1, SignatureAlgorithm::Ecdsa) => Ok(()),
         _ => Err(KeystoreError::InvalidAlgorithmPair),
     }
+}
+
+fn generate_key(
+    curve: Curve,
+    algorithm: SignatureAlgorithm,
+) -> Result<(Zeroizing<[u8; PRIVATE_KEY_LEN]>, Vec<u8>), KeystoreError> {
+    match (curve, algorithm) {
+        (Curve::Edwards25519, SignatureAlgorithm::EdDsa) => {
+            let mut seed = Zeroizing::new([0u8; PRIVATE_KEY_LEN]);
+            OsRng.fill_bytes(&mut seed[..]);
+            let signing_key = Ed25519SigningKey::from_bytes(&seed);
+            let public_key = signing_key.verifying_key().to_bytes().to_vec();
+            Ok((seed, public_key))
+        }
+        (Curve::Secp256k1, SignatureAlgorithm::Ecdsa) => loop {
+            let mut scalar = Zeroizing::new([0u8; PRIVATE_KEY_LEN]);
+            OsRng.fill_bytes(&mut scalar[..]);
+            let signing_key = match EcdsaSigningKey::from_slice(&scalar[..]) {
+                Ok(signing_key) => signing_key,
+                Err(_) => continue,
+            };
+
+            let mut private_key = Zeroizing::new([0u8; PRIVATE_KEY_LEN]);
+            private_key.copy_from_slice(&signing_key.to_bytes());
+            let public_key = signing_key
+                .verifying_key()
+                .to_encoded_point(true)
+                .as_bytes()
+                .to_vec();
+            return Ok((private_key, public_key));
+        },
+        _ => Err(KeystoreError::InvalidAlgorithmPair),
+    }
+}
+
+fn sign_ecdsa(
+    private_key: &[u8; PRIVATE_KEY_LEN],
+    digest: &[u8],
+) -> Result<Vec<u8>, KeystoreError> {
+    if digest.len() != 32 {
+        return Err(KeystoreError::InvalidPayload);
+    }
+
+    let signing_key =
+        EcdsaSigningKey::from_slice(private_key).map_err(|_| KeystoreError::Corrupt)?;
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(digest)
+        .map_err(|_| KeystoreError::Internal)?;
+
+    // Ethereum uses low-s signatures. Negating s also flips the y parity bit
+    // of the recovery id.
+    let mut recovery = recovery_id.to_byte();
+    let signature = match signature.normalize_s() {
+        Some(normalized) => {
+            recovery ^= 1;
+            normalized
+        }
+        None => signature,
+    };
+    if recovery > 1 {
+        return Err(KeystoreError::Internal);
+    }
+
+    let mut bytes = signature.to_bytes().to_vec();
+    bytes.push(27 + recovery);
+    Ok(bytes)
 }
 
 fn key_binding(
@@ -558,12 +667,18 @@ mod tests {
     use super::*;
     use time::OffsetDateTime;
 
-    fn record(id: KeyId, public_key: &[u8], encrypted: EncryptedKey) -> KeyRecord {
+    fn record_for(
+        id: KeyId,
+        curve: Curve,
+        algorithm: SignatureAlgorithm,
+        public_key: &[u8],
+        encrypted: EncryptedKey,
+    ) -> KeyRecord {
         let now = OffsetDateTime::now_utc();
         KeyRecord {
             id,
-            curve: Curve::Edwards25519,
-            algorithm: SignatureAlgorithm::EdDsa,
+            curve,
+            algorithm,
             public_key: public_key.to_vec(),
             ciphertext: encrypted.ciphertext,
             nonce: encrypted.nonce,
@@ -576,14 +691,26 @@ mod tests {
         }
     }
 
+    fn record(id: KeyId, public_key: &[u8], encrypted: EncryptedKey) -> KeyRecord {
+        record_for(
+            id,
+            Curve::Edwards25519,
+            SignatureAlgorithm::EdDsa,
+            public_key,
+            encrypted,
+        )
+    }
+
     #[test]
     fn envelope_roundtrip_binds_metadata() {
         let kek = [7u8; 32];
         let id = Uuid::new_v4();
         let seed = [9u8; 32];
-        let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+        let public_key = Ed25519SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes();
 
-        let encrypted = encrypt_ed25519(
+        let encrypted = encrypt_key_material(
             &kek,
             id,
             Curve::Edwards25519,
@@ -593,7 +720,7 @@ mod tests {
         )
         .unwrap();
 
-        let decrypted = decrypt_ed25519(&kek, &record(id, &public_key, encrypted)).unwrap();
+        let decrypted = decrypt_key_material(&kek, &record(id, &public_key, encrypted)).unwrap();
         assert_eq!(&*decrypted, &seed);
     }
 
@@ -602,7 +729,7 @@ mod tests {
         use crate::storage::SqliteStore;
         use crate::unseal::{HolderIndex, UnsealConfig, UnsealManager};
 
-        let holder_key = SigningKey::from_bytes(&[1u8; 32]);
+        let holder_key = Ed25519SigningKey::from_bytes(&[1u8; 32]);
         let holders = vec![HolderIndex {
             id: "holder-1".to_string(),
             index: 1,
@@ -663,7 +790,7 @@ mod tests {
         use crate::storage::SqliteStore;
         use crate::unseal::{HolderIndex, UnsealConfig, UnsealManager};
 
-        let holder_key = SigningKey::from_bytes(&[1u8; 32]);
+        let holder_key = Ed25519SigningKey::from_bytes(&[1u8; 32]);
         let holders = vec![HolderIndex {
             id: "holder-1".to_string(),
             index: 1,
@@ -697,13 +824,62 @@ mod tests {
     }
 
     #[test]
+    fn secp256k1_envelope_and_signature_roundtrip() {
+        use k256::ecdsa::signature::hazmat::PrehashVerifier;
+        use k256::ecdsa::{Signature as EcdsaSignature, SigningKey as EcdsaSigningKey};
+
+        let kek = [7u8; 32];
+        let id = Uuid::new_v4();
+        let signing_key = EcdsaSigningKey::from_slice(&[1u8; 32]).unwrap();
+        let mut private_key = [0u8; PRIVATE_KEY_LEN];
+        private_key.copy_from_slice(&signing_key.to_bytes());
+        let public_key = signing_key
+            .verifying_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .to_vec();
+
+        let encrypted = encrypt_key_material(
+            &kek,
+            id,
+            Curve::Secp256k1,
+            SignatureAlgorithm::Ecdsa,
+            &public_key,
+            &private_key,
+        )
+        .unwrap();
+        let record = record_for(
+            id,
+            Curve::Secp256k1,
+            SignatureAlgorithm::Ecdsa,
+            &public_key,
+            encrypted,
+        );
+        let decrypted = decrypt_key_material(&kek, &record).unwrap();
+        assert_eq!(&*decrypted, &private_key);
+
+        let digest = [9u8; 32];
+        let signature_bytes = sign_ecdsa(&decrypted, &digest).unwrap();
+        assert_eq!(signature_bytes.len(), 65);
+
+        let signature = EcdsaSignature::from_slice(&signature_bytes[..64]).unwrap();
+        assert!(signature.normalize_s().is_none());
+        signing_key
+            .verifying_key()
+            .verify_prehash(&digest, &signature)
+            .unwrap();
+    }
+
+    #[test]
     fn envelope_rejects_wrong_kek_and_tampering() {
         let kek = [7u8; 32];
         let other_kek = [8u8; 32];
         let id = Uuid::new_v4();
         let seed = [9u8; 32];
-        let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
-        let encrypted = encrypt_ed25519(
+        let public_key = Ed25519SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes();
+        let encrypted = encrypt_key_material(
             &kek,
             id,
             Curve::Edwards25519,
@@ -714,11 +890,11 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            decrypt_ed25519(&other_kek, &record(id, &public_key, encrypted)),
+            decrypt_key_material(&other_kek, &record(id, &public_key, encrypted)),
             Err(KeystoreError::Corrupt)
         ));
 
-        let encrypted = encrypt_ed25519(
+        let encrypted = encrypt_key_material(
             &kek,
             id,
             Curve::Edwards25519,
@@ -730,11 +906,11 @@ mod tests {
         let mut wrong_public_key = public_key;
         wrong_public_key[0] ^= 1;
         assert!(matches!(
-            decrypt_ed25519(&kek, &record(id, &wrong_public_key, encrypted)),
+            decrypt_key_material(&kek, &record(id, &wrong_public_key, encrypted)),
             Err(KeystoreError::Corrupt)
         ));
 
-        let mut encrypted = encrypt_ed25519(
+        let mut encrypted = encrypt_key_material(
             &kek,
             id,
             Curve::Edwards25519,
@@ -746,7 +922,7 @@ mod tests {
         let last = encrypted.ciphertext.len() - 1;
         encrypted.ciphertext[last] ^= 1;
         assert!(matches!(
-            decrypt_ed25519(&kek, &record(id, &public_key, encrypted)),
+            decrypt_key_material(&kek, &record(id, &public_key, encrypted)),
             Err(KeystoreError::Corrupt)
         ));
     }

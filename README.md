@@ -30,20 +30,20 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 | VSS 份额校验（Holder 导入 + Server 提交） | ✅ 已实现 |
 | gRPC 解封接口（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal） | ✅ 已实现 |
 | 桌面端 Holder 身份、份额 vault 与解封提交（Tauri） | ✅ 已实现 |
-| 加密 keystore（DEK/KEK 信封） | 🚧 Ed25519 已实现；secp256k1 待实现 |
+| 加密 keystore（DEK/KEK 信封） | ✅ Ed25519 与 secp256k1 已实现 |
 | 份额提交加密与持有者签名 | ✅ 已实现（每会话 X25519 + Ed25519；gRPC 仍无 TLS） |
-| 密钥管理接口与签名 | 🚧 EdDSA 的 CreateKey/GetPublicKey/ListKeys/Sign 已实现；ECDSA 与 ImportKey 未实现 |
+| 密钥管理接口与签名 | ✅ EdDSA/ECDSA 的 CreateKey/GetPublicKey/ListKeys/Sign 已实现；ImportKey 未实现 |
 
 ## v0.1 目标特性
 
-以下为 v0.1 目标；存储、解封、份额分发和桌面端 Holder 流程已完成，Ed25519 密钥生成与签名已可用，secp256k1 与 ImportKey 仍在开发中。
+以下为 v0.1 目标；存储、解封、份额分发、桌面端 Holder 流程和基于 Ed25519 / secp256k1 的密钥生成与签名已完成，ImportKey 仍在开发中。
 
 - 加密存储：每密钥独立 DEK，KEK 信封包裹（XChaCha20-Poly1305）
 - 支持导入已有私钥（secp256k1 标量 / edwards25519 种子）
 - 份额分发：对 VSS 份额做 X25519 信封加密，每个持有者用本地私钥解密
 - 门限解封：对 KEK 做 Ristretto255 Feldman VSS 分享，逐份校验份额，并用 KEK 校验密文验证重建结果
 - 安全提交：会话 nonce 绑定、份额加密到每会话临时 X25519 公钥、持有者 Ed25519 签名，服务端验签/解密/VSS 后才计数
-- 签名：secp256k1 + ECDSA（EVM，待实现）与 edwards25519 + EdDSA（Solana，已实现）
+- 签名：secp256k1 + ECDSA（EVM）与 edwards25519 + EdDSA（Solana）
 - gRPC 接口（tonic）：解封接口与 EdDSA 密钥管理/签名
 - 所有密钥操作写入审计日志
 - 存储层抽象：SQLite（单机）/ PostgreSQL（集群）共用同一套 trait
@@ -149,7 +149,7 @@ cargo run
 
 ## API
 
-gRPC 定义见 [`proto/signer/v1/signer.proto`](proto/signer/v1/signer.proto)。解封相关方法与 EdDSA 的 `CreateKey`、`GetPublicKey`、`ListKeys`、`Sign` 已实现；`ImportKey` 与 secp256k1/ECDSA 仍返回 `UNIMPLEMENTED`。
+gRPC 定义见 [`proto/signer/v1/signer.proto`](proto/signer/v1/signer.proto)。解封相关方法与 EdDSA/ECDSA 的 `CreateKey`、`GetPublicKey`、`ListKeys`、`Sign` 已实现；`ImportKey` 仍返回 `UNIMPLEMENTED`。
 
 | 方法 | 说明 |
 | --- | --- |

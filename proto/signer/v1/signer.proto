@@ -16,8 +16,8 @@ import "google/protobuf/timestamp.proto";
 //   INTERNAL                          — internal crypto/storage error (no sensitive details returned)
 service SignerService {
   // Create a key: generate a private key and a per-key DEK, then wrap the DEK with the KEK.
-  // v0.1 implements CURVE_EDWARDS25519 + SIGNATURE_ALGORITHM_EDDSA only;
-  // secp256k1/ECDSA currently returns UNIMPLEMENTED.
+  // v0.1 supports CURVE_EDWARDS25519 + SIGNATURE_ALGORITHM_EDDSA and
+  // CURVE_SECP256K1 + SIGNATURE_ALGORITHM_ECDSA.
   rpc CreateKey(CreateKeyRequest) returns (CreateKeyResponse);
 
   // Import an existing private key (e.g. one that controls on-chain assets).
@@ -173,7 +173,7 @@ message SignResponse {
   string key_id = 1;
 
   // Signature; format depends on the key's algorithm:
-  //   ECDSA (secp256k1)     — 65 bytes, r || s || v
+  //   ECDSA (secp256k1)     — 65 bytes, r || s || v, low-s, v in {27, 28}
   //   EdDSA (edwards25519)  — 64 bytes
   bytes signature = 2;
 

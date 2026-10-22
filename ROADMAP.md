@@ -3,18 +3,18 @@
 ## v0.1 — 单签 + 门限解封
 
 - [x] edwards25519 + EdDSA 密钥生成
-- [ ] secp256k1 + ECDSA 密钥生成
+- [x] secp256k1 + ECDSA 密钥生成
 - [ ] 导入已有私钥（secp256k1 标量 / edwards25519 种子）
 - [x] Ed25519 每密钥 DEK + KEK 信封加密（XChaCha20-Poly1305）
-- [ ] secp256k1 DEK/KEK 信封加密
+- [x] secp256k1 DEK/KEK 信封加密
 - [x] KEK 生成与加密 share 文件分发（signer-admin）
 - [x] Ristretto255 Feldman VSS 分片、逐份校验与 KEK 校验
 - [x] 解封会话、份额收集与 KEK 恢复（核心）
 - [x] 持有者 Ed25519 签名、会话 nonce 绑定、每会话 X25519 份额加密与 VSS 校验
 - [ ] gRPC TLS/mTLS 与服务端认证
 - [x] 通过 gRPC 接入解封流程（`StartUnseal` / `SubmitUnsealShare` / `GetUnsealStatus` / `Seal`）
-- [x] EdDSA gRPC 接口：`CreateKey`、`GetPublicKey`、`ListKeys`、`Sign`
-- [ ] ECDSA 与 `ImportKey`
+- [x] EdDSA/ECDSA gRPC 接口：`CreateKey`、`GetPublicKey`、`ListKeys`、`Sign`
+- [ ] `ImportKey`
 - [x] CreateKey / Sign 审计日志（其余操作待补）
 - [x] SQLite 存储后端
 - [ ] 基于 anvil 与 Solana 测试验证器的集成测试

@@ -366,9 +366,11 @@ fn map_keystore_error(error: KeystoreError) -> Status {
         KeystoreError::NotFound => Status::not_found("key not found"),
         KeystoreError::Conflict => Status::already_exists("key already exists"),
         KeystoreError::KeyNotActive => Status::failed_precondition("key is not active"),
-        KeystoreError::Unsupported(message) => Status::unimplemented(message),
         KeystoreError::InvalidAlgorithmPair => {
             Status::invalid_argument("unsupported curve/algorithm pair")
+        }
+        KeystoreError::InvalidPayload => {
+            Status::invalid_argument("ECDSA payload must be a 32-byte digest")
         }
         KeystoreError::InvalidMaterial | KeystoreError::Corrupt => {
             Status::internal("stored key is corrupt")
@@ -441,6 +443,8 @@ mod tests {
     use ed25519_dalek::{
         Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey,
     };
+    use k256::ecdsa::signature::hazmat::PrehashVerifier;
+    use k256::ecdsa::{RecoveryId, Signature as EcdsaSignature, VerifyingKey as EcdsaVerifyingKey};
     use rand::RngCore;
     use rand::rngs::OsRng;
     use signer_core::storage::SqliteStore;
@@ -681,16 +685,6 @@ mod tests {
         assert_eq!(key.state, pb::KeyState::Active as i32);
         assert_eq!(key.public_key.len(), 32);
 
-        let error = service
-            .create_key(Request::new(CreateKeyRequest {
-                curve: pb::Curve::Secp256k1 as i32,
-                algorithm: pb::SignatureAlgorithm::Ecdsa as i32,
-                labels: Default::default(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::Unimplemented);
-
         let payload = b"hello signer".to_vec();
         let signed = service
             .sign(Request::new(SignRequest {
@@ -740,6 +734,72 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn secp256k1_key_lifecycle_end_to_end() {
+        let (service, shares, holders) = setup().await;
+
+        let start = service
+            .start_unseal(Request::new(StartUnsealRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        for index in 0..2 {
+            service
+                .submit_unseal_share(Request::new(submission_request(
+                    &start,
+                    &holders[index],
+                    &shares[index],
+                )))
+                .await
+                .unwrap();
+        }
+
+        let created = service
+            .create_key(Request::new(CreateKeyRequest {
+                curve: pb::Curve::Secp256k1 as i32,
+                algorithm: pb::SignatureAlgorithm::Ecdsa as i32,
+                labels: Default::default(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let key = created.key.expect("create_key returns a key");
+        assert_eq!(key.state, pb::KeyState::Active as i32);
+        assert_eq!(key.public_key.len(), 33);
+
+        let digest = [7u8; 32];
+        let signed = service
+            .sign(Request::new(SignRequest {
+                key_id: key.id.clone(),
+                payload: digest.to_vec(),
+                request_id: "req-ecdsa".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(signed.signature.len(), 65);
+
+        let signature = EcdsaSignature::from_slice(&signed.signature[..64]).unwrap();
+        assert!(signature.normalize_s().is_none());
+        let verifying_key = EcdsaVerifyingKey::from_sec1_bytes(&key.public_key).unwrap();
+        verifying_key.verify_prehash(&digest, &signature).unwrap();
+
+        let recovery = RecoveryId::from_byte(signed.signature[64] - 27).unwrap();
+        let recovered =
+            EcdsaVerifyingKey::recover_from_prehash(&digest, &signature, recovery).unwrap();
+        assert_eq!(recovered, verifying_key);
+
+        let error = service
+            .sign(Request::new(SignRequest {
+                key_id: key.id,
+                payload: vec![1u8; 31],
+                request_id: "req-bad-digest".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]
