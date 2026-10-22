@@ -13,7 +13,7 @@ use super::model::{
     AuditEntry, Curve, KeyId, KeyMetadata, KeyRecord, KeyState, NewKey, Page, SessionId,
     SignatureAlgorithm, UnsealSession,
 };
-use super::store::{KeyStore, StorageError};
+use super::store::{KeyStore, PoolConfig, StorageError};
 
 /// PostgreSQL-backed storage for multi-instance / HA deployments.
 pub struct PostgresStore {
@@ -23,8 +23,20 @@ pub struct PostgresStore {
 impl PostgresStore {
     /// Connect to the database and run migrations.
     pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
+        Self::connect_with_pool(database_url, PoolConfig::postgres_default()).await
+    }
+
+    /// Connect with explicit pool settings.
+    pub async fn connect_with_pool(
+        database_url: &str,
+        pool_config: PoolConfig,
+    ) -> Result<Self, StorageError> {
         let pool = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(pool_config.max_connections)
+            .min_connections(pool_config.min_connections)
+            .acquire_timeout(pool_config.acquire_timeout)
+            .idle_timeout(pool_config.idle_timeout)
+            .max_lifetime(pool_config.max_lifetime)
             .connect(database_url)
             .await
             .map_err(map_sqlx_error)?;
@@ -209,6 +221,44 @@ impl KeyStore for PostgresStore {
         KeyRecord::try_from(row)
     }
 
+    async fn insert_key_with_audit(
+        &self,
+        key: NewKey,
+        audit: &AuditEntry,
+    ) -> Result<KeyRecord, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+
+        let row = sqlx::query_as::<_, PgKeyRow>(INSERT_KEY)
+            .bind(key.id)
+            .bind(key.curve.as_str())
+            .bind(key.algorithm.as_str())
+            .bind(&key.public_key)
+            .bind(&key.ciphertext)
+            .bind(&key.nonce)
+            .bind(&key.wrapped_dek)
+            .bind(&key.dek_nonce)
+            .bind(key.state.as_str())
+            .bind(Json(key.labels.clone()))
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+        sqlx::query(INSERT_AUDIT)
+            .bind(&audit.actor)
+            .bind(&audit.action)
+            .bind(audit.key_id)
+            .bind(audit.session_id)
+            .bind(audit.result.as_str())
+            .bind(Json(audit.metadata.clone()))
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+        tx.commit().await.map_err(map_sqlx_error)?;
+
+        KeyRecord::try_from(row)
+    }
+
     async fn get_key(&self, id: KeyId) -> Result<Option<KeyRecord>, StorageError> {
         let row = sqlx::query_as::<_, PgKeyRow>(SELECT_KEY)
             .bind(id)
@@ -318,6 +368,8 @@ impl KeyStore for PostgresStore {
     }
 
     async fn append_audit(&self, entry: &AuditEntry) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+
         sqlx::query(INSERT_AUDIT)
             .bind(&entry.actor)
             .bind(&entry.action)
@@ -325,10 +377,11 @@ impl KeyStore for PostgresStore {
             .bind(entry.session_id)
             .bind(entry.result.as_str())
             .bind(Json(entry.metadata.clone()))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
 
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
 }
@@ -379,7 +432,18 @@ mod tests {
         let key = test_key(public_key.clone());
         let id = key.id;
 
-        let record = store.insert_key(key.clone()).await.unwrap();
+        let audit = AuditEntry {
+            actor: "operator".to_string(),
+            action: "key.created".to_string(),
+            key_id: Some(id),
+            session_id: None,
+            result: AuditResult::Ok,
+            metadata: BTreeMap::new(),
+        };
+        let record = store
+            .insert_key_with_audit(key.clone(), &audit)
+            .await
+            .unwrap();
         assert_eq!(record.id, id);
         assert_eq!(record.labels.get("env").map(String::as_str), Some("test"));
 

@@ -1,0 +1,15 @@
+# Default configuration baked into the signer image.
+# Mount over this file at runtime to change server settings:
+#   -v /path/to/signer.toml:/etc/signer/signer.toml:ro
+
+[server]
+# The container must listen on all interfaces to be reachable from the host.
+grpc_addr = "0.0.0.0:50051"
+data_dir = "/var/lib/signer/data"
+session_ttl_secs = 600
+
+[database]
+# Prefer SIGNER_DATABASE_URL in the container so the password is not baked
+# into the image. If omitted, /var/lib/signer/data/signer.db (SQLite) is used.
+# Example for the local compose PostgreSQL:
+# url = "postgres://signer:signer-dev-password@postgres:5432/signer?sslmode=disable"

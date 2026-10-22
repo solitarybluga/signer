@@ -16,6 +16,8 @@ import "google/protobuf/timestamp.proto";
 //   INTERNAL                          — internal crypto/storage error (no sensitive details returned)
 service SignerService {
   // Create a key: generate a private key and a per-key DEK, then wrap the DEK with the KEK.
+  // v0.1 implements CURVE_EDWARDS25519 + SIGNATURE_ALGORITHM_EDDSA only;
+  // secp256k1/ECDSA currently returns UNIMPLEMENTED.
   rpc CreateKey(CreateKeyRequest) returns (CreateKeyResponse);
 
   // Import an existing private key (e.g. one that controls on-chain assets).
@@ -102,6 +104,9 @@ message CreateKeyRequest {
 
   // Optional labels for lookup only; must not contain sensitive data.
   map<string, string> labels = 3;
+
+  // v0.1 creates keys directly in KEY_STATE_ACTIVE. There is no separate
+  // activation RPC yet; an approval workflow can be added later.
 }
 
 message CreateKeyResponse {

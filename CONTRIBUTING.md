@@ -2,7 +2,7 @@
 
 ## 开发环境
 
-- Rust 1.85+（edition 2024）
+- Rust 1.90+（edition 2024）
 - 提交前运行：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`
 
 ```bash

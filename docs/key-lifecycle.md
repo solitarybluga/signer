@@ -1,6 +1,8 @@
 # 密钥生命周期
 
-> 状态：草稿。
+> 状态：部分实现。Ed25519 的 CreateKey / GetPublicKey / ListKeys / Sign、DEK/KEK 信封、SQLite/PostgreSQL 存储和 CreateKey/Sign 审计已实现；密钥创建后直接进入 `活跃` 状态。ImportKey（等待 mTLS）、secp256k1/ECDSA、Get/List 审计、unseal 审计、轮换与销毁仍待实现。
+
+> 实现位置：`crates/core/src/keystore.rs`。
 
 ## 密钥状态
 
@@ -29,7 +31,7 @@ stateDiagram-v2
 4. 用 KEK 以 XChaCha20-Poly1305 包裹 DEK。
 5. 持久化私钥密文、DEK 密文、两个 AEAD nonce、曲线、算法与公钥。
 6. 擦除私钥明文、DEK 明文等缓冲区。
-7. 写入审计事件。
+7. 在同一个数据库事务中写入密钥和审计事件（CreateKey 已接入）。
 
 TODO：如果份额按密钥单独生成，补充份额生成仪式流程。
 
@@ -52,9 +54,9 @@ TODO：如果份额按密钥单独生成，补充份额生成仪式流程。
 ## 签名
 
 - 要求密钥处于 `活跃` 状态，且服务已解封。
-- 首次使用某密钥时，用 KEK 解包其 DEK，再用 DEK 解密私钥；解包与解密后的材料只存在于内存。
+- 每次签名时用 KEK 解包其 DEK，再用 DEK 解密私钥；当前不做 DEK 缓存，解包与解密后的材料只存在于内存。
 - 签名过程不得把明文密钥写到任何地方。
-- 每次签名请求都写审计（密钥 ID、调用方、结果——不记录载荷）。
+- 每次签名请求都写审计（密钥 ID、调用方、结果、`request_id`、`payload_len`——不记录载荷内容）。Sign 审计提交成功后才返回签名；GetPublicKey / ListKeys 和 unseal 操作尚未审计。
 
 ## 轮换
 

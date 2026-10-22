@@ -30,21 +30,21 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 | VSS 份额校验（Holder 导入 + Server 提交） | ✅ 已实现 |
 | gRPC 解封接口（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal） | ✅ 已实现 |
 | 桌面端 Holder 身份、份额 vault 与解封提交（Tauri） | ✅ 已实现 |
-| 加密 keystore（DEK/KEK、VSS 分享） | 🚧 开发中 |
+| 加密 keystore（DEK/KEK 信封） | 🚧 Ed25519 已实现；secp256k1 待实现 |
 | 份额提交加密与持有者签名 | ✅ 已实现（每会话 X25519 + Ed25519；gRPC 仍无 TLS） |
-| 密钥管理接口与签名（ECDSA / EdDSA） | 🚧 未开始 |
+| 密钥管理接口与签名 | 🚧 EdDSA 的 CreateKey/GetPublicKey/ListKeys/Sign 已实现；ECDSA 与 ImportKey 未实现 |
 
 ## v0.1 目标特性
 
-以下为 v0.1 目标；存储、解封、份额分发和桌面端 Holder 流程已完成，keystore 与签名仍在开发中。
+以下为 v0.1 目标；存储、解封、份额分发和桌面端 Holder 流程已完成，Ed25519 密钥生成与签名已可用，secp256k1 与 ImportKey 仍在开发中。
 
 - 加密存储：每密钥独立 DEK，KEK 信封包裹（XChaCha20-Poly1305）
 - 支持导入已有私钥（secp256k1 标量 / edwards25519 种子）
 - 份额分发：对 VSS 份额做 X25519 信封加密，每个持有者用本地私钥解密
 - 门限解封：对 KEK 做 Ristretto255 Feldman VSS 分享，逐份校验份额，并用 KEK 校验密文验证重建结果
 - 安全提交：会话 nonce 绑定、份额加密到每会话临时 X25519 公钥、持有者 Ed25519 签名，服务端验签/解密/VSS 后才计数
-- 签名：secp256k1 + ECDSA（EVM）与 edwards25519 + EdDSA（Solana）
-- gRPC 解封接口（tonic）：StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal
+- 签名：secp256k1 + ECDSA（EVM，待实现）与 edwards25519 + EdDSA（Solana，已实现）
+- gRPC 接口（tonic）：解封接口与 EdDSA 密钥管理/签名
 - 所有密钥操作写入审计日志
 - 存储层抽象：SQLite（单机）/ PostgreSQL（集群）共用同一套 trait
 
@@ -66,7 +66,7 @@ flowchart LR
 
 ## 快速开始
 
-前置：Rust 1.85+、Docker（运行测试时）。protoc 已由 `protoc-bin-vendored` 随构建提供。
+前置：Rust 1.90+、Docker（运行测试时）。protoc 已由 `protoc-bin-vendored` 随构建提供。
 
 先完成一次初始化仪式：
 
@@ -84,8 +84,9 @@ cargo run -p signer-admin -- operator-keygen --out operator.key --pub-out operat
 # 4. 生成 KEK、VSS 分片并加密导出 share 文件
 cargo run -p signer-admin -- init --holders holders.json --operator-key operator.key
 
-# 5. 启动服务
-cargo run -p signer-server
+# 5. 准备配置并启动服务
+cp signer.example.toml signer.toml   # 按需修改；signer.toml 已被 gitignore
+cargo run -p signer-server -- --config signer.toml
 ```
 
 `holders.json` 只接受桌面端导出的 holder public bundle（`holder_id`、`x25519_public`、`ed25519_public`、`self_signature`）；旧的 X25519-only 格式会导致 `init` 报错。提供 `--operator-key` 时，`init` 还会写出 `manifest.json`、`manifest.sig` 和 `operator.pub`，桌面端可据此验证份额来源。
@@ -94,7 +95,30 @@ VSS 解封使用 `kek_check.json` v3（包含 holder Ed25519 注册表）、mani
 
 服务端不再自动生成 KEK；缺少 `data/kek_check.json` 会报错并提示先执行 `signer-admin init`。生成的 `data/shares/*.share` 必须交给对应持有者，`data/` 不能提交到仓库。
 
-可用环境变量：`SIGNER_GRPC_ADDR`、`SIGNER_DATA_DIR`、`SIGNER_SESSION_TTL_SECS`。
+服务端默认读取工作目录下的 `signer.toml`；可用 `--config <path>` 或 `SIGNER_CONFIG` 指定其他路径。配置示例见 [`signer.example.toml`](signer.example.toml)，实际 `signer.toml` 已被 gitignore。环境变量 `SIGNER_GRPC_ADDR`、`SIGNER_DATA_DIR`、`SIGNER_SESSION_TTL_SECS`、`SIGNER_DATABASE_URL` 会覆盖配置文件中的对应值。未配置 `database.url` 时，默认使用 `$data_dir/signer.db`（SQLite）；`postgres://...` 则使用 PostgreSQL。连接池参数（`max_connections`、`min_connections`、`acquire_timeout_secs`、`idle_timeout_secs`、`max_lifetime_secs`）也在 `[database]` 中配置。
+
+日志使用 `tracing`，默认 `info` 级别并输出源码文件和行号；可在 `signer.toml` 的 `[logging]` 中设置 `level` / `format` / `location`，或用 `RUST_LOG` 覆盖级别，例如 `RUST_LOG=signer_server=debug,sqlx=warn`。
+
+本地 PostgreSQL 可以用仓库根目录的 compose 文件启动：
+
+```bash
+docker compose up -d --wait postgres
+# signer.toml:
+# [database]
+# url = "postgres://signer:signer-dev-password@127.0.0.1:5432/signer?sslmode=disable"
+
+docker compose down          # 停止容器，保留数据卷
+docker compose down -v       # 删除数据卷，数据会丢失
+
+# 连同 signer server 一起构建并启动
+# 需要 signer.toml 和 data/kek_check.json
+cp signer.example.toml signer.toml
+docker compose --profile server up -d --build
+```
+
+compose 会把 `./signer.toml` 挂载到容器的 `/etc/signer/signer.toml`，并通过环境变量把监听地址、数据目录和数据库 URL 覆盖成容器内值。
+
+compose 默认密码仅用于本地开发；生产环境请通过 `POSTGRES_PASSWORD` 覆盖，或改用外部 PostgreSQL。
 
 ### 桌面客户端
 
@@ -112,7 +136,7 @@ cargo run
 | 路径 | 说明 |
 | --- | --- |
 | `crates/proto` | `signer.v1` proto 与生成的 Rust 代码 |
-| `crates/core` | 存储层与门限解封核心 |
+| `crates/core` | 存储层、门限解封与 keystore |
 | `crates/vss` | Ristretto255 Feldman VSS：份额生成、验证与恢复 |
 | `crates/holder` | Holder 身份、manifest 验签、share vault 与份额导入 |
 | `crates/share` | X25519 份额信封加密 |
@@ -125,7 +149,7 @@ cargo run
 
 ## API
 
-gRPC 定义见 [`proto/signer/v1/signer.proto`](proto/signer/v1/signer.proto)。解封相关方法已实现；`CreateKey`、`ImportKey`、`GetPublicKey`、`ListKeys`、`Sign` 目前返回 `UNIMPLEMENTED`。
+gRPC 定义见 [`proto/signer/v1/signer.proto`](proto/signer/v1/signer.proto)。解封相关方法与 EdDSA 的 `CreateKey`、`GetPublicKey`、`ListKeys`、`Sign` 已实现；`ImportKey` 与 secp256k1/ECDSA 仍返回 `UNIMPLEMENTED`。
 
 | 方法 | 说明 |
 | --- | --- |
@@ -150,6 +174,7 @@ gRPC 定义见 [`proto/signer/v1/signer.proto`](proto/signer/v1/signer.proto)。
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | 组件、数据流、部署拓扑 |
 | [docs/threat-model.md](docs/threat-model.md) | 资产、信任边界、非目标 |
+| [docs/cryptography.md](docs/cryptography.md) | 密码学原语、协议原理与项目中的使用位置 |
 | [docs/key-lifecycle.md](docs/key-lifecycle.md) | 密钥创建、轮换、备份、销毁 |
 | [docs/unseal-protocol.md](docs/unseal-protocol.md) | 门限解封协议 |
 | [docs/vss-unseal.md](docs/vss-unseal.md) | VSS 增强解封方案与实现说明 |

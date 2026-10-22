@@ -1,6 +1,6 @@
 # 存储
 
-> 状态：草稿。
+> 状态：草稿。密钥与 DEK 信封已接入服务主流程（SQLite/PostgreSQL）；解封会话仍保存在内存中。
 
 ## 需求
 
@@ -25,6 +25,11 @@ LevelDB 是一类常见的嵌入式存储方案。它没有复制能力，也无
 #[async_trait]
 pub trait KeyStore: Send + Sync {
     async fn insert_key(&self, key: NewKey) -> Result<KeyRecord, StorageError>;
+    async fn insert_key_with_audit(
+        &self,
+        key: NewKey,
+        audit: &AuditEntry,
+    ) -> Result<KeyRecord, StorageError>;
     async fn get_key(&self, id: KeyId) -> Result<Option<KeyRecord>, StorageError>;
     async fn list_keys(&self, page: Page) -> Result<Vec<KeyMetadata>, StorageError>;
     async fn update_key_state(&self, id: KeyId, state: KeyState) -> Result<(), StorageError>;
@@ -41,7 +46,9 @@ pub trait KeyStore: Send + Sync {
 }
 ```
 
-实现位于 `src/storage/postgres.rs` 与 `src/storage/sqlite.rs`。
+实现位于 `src/storage/postgres.rs` 与 `src/storage/sqlite.rs`。连接池由 `PoolConfig` 控制：PostgreSQL 默认最多 10 个连接，SQLite 默认 1 个连接；两者都支持 `min_connections`、`acquire_timeout`、`idle_timeout` 和 `max_lifetime`。SQLite 额外使用 `sqlite_busy_timeout` 处理单写者锁等待。
+
+`insert_key_with_audit` 在同一个数据库事务中写入 `keys` 和 `audit_log`：审计失败时密钥插入回滚。`append_audit` 也使用显式事务提交；Sign 本身没有持久化写入，审计提交成功后才把签名返回给调用方。
 
 trait 不得暴露明文密钥材料。加密发生在 `keystore` 组件中，存储层只看到不透明字节。
 

@@ -1,0 +1,48 @@
+# Copy to signer.toml and keep the real file local (it may contain secrets).
+# If it contains a database password, set permissions to 0600.
+# Environment variables listed below override the corresponding values.
+
+[server]
+# gRPC listen address. Override with SIGNER_GRPC_ADDR.
+grpc_addr = "127.0.0.1:50051"
+
+# Directory containing kek_check.json and the default SQLite database.
+# Relative paths are resolved from the process working directory.
+# Override with SIGNER_DATA_DIR.
+data_dir = "data"
+
+# Unseal session lifetime in seconds. Override with SIGNER_SESSION_TTL_SECS.
+session_ttl_secs = 600
+
+[database]
+# Optional. When omitted, $data_dir/signer.db is used.
+# Override with SIGNER_DATABASE_URL.
+#
+# url = "sqlite://data/signer.db"
+# Local docker-compose.yml (no TLS):
+# url = "postgres://signer:signer-dev-password@127.0.0.1:5432/signer?sslmode=disable"
+# Production should use sslmode=require or verify-full:
+# url = "postgres://signer:change-me@db.internal:5432/signer?sslmode=require"
+
+# Pool defaults: PostgreSQL 10, SQLite 1. If set explicitly, it applies to
+# both backends; keep SQLite at 1 unless you understand its single-writer model.
+# max_connections = 10
+# min_connections = 0
+
+# Connection establishment / pool acquisition timeout.
+# acquire_timeout_secs = 5
+
+# 0 disables idle timeout / maximum lifetime.
+# idle_timeout_secs = 600
+# max_lifetime_secs = 1800
+
+# SQLite only; ignored by PostgreSQL.
+# sqlite_busy_timeout_secs = 5
+
+[logging]
+# Used when RUST_LOG is not set. RUST_LOG overrides this value.
+level = "info"
+# "text" for human-readable logs, "json" for structured logs.
+format = "text"
+# Include source file and line number in each event.
+location = true

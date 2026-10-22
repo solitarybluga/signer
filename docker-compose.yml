@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: signer-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: signer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-signer-dev-password}
+      POSTGRES_DB: signer
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --data-checksums"
+      TZ: UTC
+    ports:
+      # Bind to localhost only. Use a private network / firewall rule for
+      # non-local access.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - signer-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signer -d signer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    shm_size: 256mb
+
+  signer:
+    profiles: ["server"]
+    image: signer-server:local
+    build: .
+    container_name: signer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Container-specific overrides; the mounted signer.toml can keep
+      # host-oriented values such as 127.0.0.1 and relative paths.
+      SIGNER_GRPC_ADDR: "0.0.0.0:50051"
+      SIGNER_DATA_DIR: "/var/lib/signer/data"
+      SIGNER_DATABASE_URL: "postgres://signer:${POSTGRES_PASSWORD:-signer-dev-password}@postgres:5432/signer?sslmode=disable"
+    ports:
+      - "127.0.0.1:50051:50051"
+    volumes:
+      # Must contain kek_check.json (and shares only if you keep them there).
+      - ./data:/var/lib/signer/data
+    configs:
+      - source: signer_config
+        target: /etc/signer/signer.toml
+
+configs:
+  signer_config:
+    file: ./signer.toml
+
+volumes:
+  signer-postgres-data:

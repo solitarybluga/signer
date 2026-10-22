@@ -1,0 +1,16 @@
+target
+desktop/src-tauri/target
+desktop/src-tauri/gen
+data
+.git
+.gitignore
+.idea
+.env
+signer.toml
+CLAUDE.md
+*.key
+*.share
+*.vault
+*.db
+*.db-shm
+*.db-wal

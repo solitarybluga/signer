@@ -81,10 +81,10 @@ impl Manifest {
             if decode_hex_exact::<32>(&holder.envelope_sha256).is_none() {
                 return Err(HolderError::InvalidManifest);
             }
-            if let Some(value) = &holder.ed25519_public {
-                if decode_hex_exact::<32>(value).is_none() {
-                    return Err(HolderError::InvalidManifest);
-                }
+            if let Some(value) = &holder.ed25519_public
+                && decode_hex_exact::<32>(value).is_none()
+            {
+                return Err(HolderError::InvalidManifest);
             }
         }
 

@@ -1,10 +1,17 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use prost_types::Timestamp;
 use time::OffsetDateTime;
 use tonic::{Request, Response, Status};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use signer_core::keystore::{Keystore, KeystoreError};
+use signer_core::storage::{
+    Curve as StorageCurve, KeyMetadata, KeyState as StorageKeyState, KeyStore, Page,
+    SignatureAlgorithm as StorageAlgorithm,
+};
 use signer_core::unseal::{SessionState, ShareSubmission, UnsealError, UnsealManager};
 use signer_proto::pb;
 
@@ -16,15 +23,19 @@ use pb::{
     signer_service_server::{SignerService, SignerServiceServer},
 };
 
+const GRPC_ACTOR: &str = "grpc";
+
 /// gRPC adapter around the unseal manager.
 #[derive(Clone)]
 pub struct SignerGrpc {
     unseal: Arc<UnsealManager>,
+    keystore: Arc<Keystore>,
 }
 
 impl SignerGrpc {
-    pub fn new(unseal: Arc<UnsealManager>) -> Self {
-        Self { unseal }
+    pub fn new(unseal: Arc<UnsealManager>, store: Arc<dyn KeyStore>) -> Self {
+        let keystore = Arc::new(Keystore::new(store, unseal.clone()));
+        Self { unseal, keystore }
     }
 
     pub fn into_server(self) -> SignerServiceServer<Self> {
@@ -36,34 +47,139 @@ impl SignerGrpc {
 impl SignerService for SignerGrpc {
     async fn create_key(
         &self,
-        _request: Request<CreateKeyRequest>,
+        request: Request<CreateKeyRequest>,
     ) -> Result<Response<CreateKeyResponse>, Status> {
-        Err(Status::unimplemented("CreateKey is not wired yet"))
+        let request = request.into_inner();
+        let curve = parse_curve(request.curve)?;
+        let algorithm = parse_algorithm(request.algorithm)?;
+        let labels: BTreeMap<String, String> = request.labels.into_iter().collect();
+        info!(
+            curve = curve.as_str(),
+            algorithm = algorithm.as_str(),
+            "CreateKey requested"
+        );
+
+        let key = self
+            .keystore
+            .create_key(curve, algorithm, labels, GRPC_ACTOR)
+            .await
+            .map_err(|error| {
+                warn!("CreateKey failed");
+                map_keystore_error(error)
+            })?;
+
+        info!(key_id = %key.id, "key created");
+        Ok(Response::new(CreateKeyResponse {
+            key: Some(key_to_proto(&key)),
+        }))
     }
 
     async fn import_key(
         &self,
         _request: Request<ImportKeyRequest>,
     ) -> Result<Response<ImportKeyResponse>, Status> {
-        Err(Status::unimplemented("ImportKey is not wired yet"))
+        Err(Status::unimplemented(
+            "ImportKey requires mTLS and is not wired yet",
+        ))
     }
 
     async fn get_public_key(
         &self,
-        _request: Request<GetPublicKeyRequest>,
+        request: Request<GetPublicKeyRequest>,
     ) -> Result<Response<GetPublicKeyResponse>, Status> {
-        Err(Status::unimplemented("GetPublicKey is not wired yet"))
+        let request = request.into_inner();
+        let key_id = parse_key_id(&request.key_id)?;
+        debug!(key_id = %key_id, "GetPublicKey requested");
+        let key = self
+            .keystore
+            .get_public_key(key_id)
+            .await
+            .map_err(|error| {
+                warn!(key_id = %key_id, "GetPublicKey failed");
+                map_keystore_error(error)
+            })?;
+
+        Ok(Response::new(GetPublicKeyResponse {
+            key_id: key.id.to_string(),
+            curve: curve_to_proto(key.curve) as i32,
+            algorithm: algorithm_to_proto(key.algorithm) as i32,
+            public_key: key.public_key,
+        }))
     }
 
     async fn list_keys(
         &self,
-        _request: Request<ListKeysRequest>,
+        request: Request<ListKeysRequest>,
     ) -> Result<Response<ListKeysResponse>, Status> {
-        Err(Status::unimplemented("ListKeys is not wired yet"))
+        let request = request.into_inner();
+        let limit = match request.page_size {
+            0 => 50,
+            value if (1..=200).contains(&value) => value as u32,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "page_size must be between 1 and 200",
+                ));
+            }
+        };
+        let offset = if request.page_token.is_empty() {
+            0
+        } else {
+            request
+                .page_token
+                .parse::<u32>()
+                .map_err(|_| Status::invalid_argument("page_token must be a decimal offset"))?
+        };
+        debug!(limit, offset, "ListKeys requested");
+
+        let keys = self
+            .keystore
+            .list_keys(Page { limit, offset })
+            .await
+            .map_err(|error| {
+                warn!("ListKeys failed");
+                map_keystore_error(error)
+            })?;
+        debug!(count = keys.len(), "ListKeys completed");
+        let next_page_token = if keys.len() == limit as usize {
+            offset.saturating_add(limit).to_string()
+        } else {
+            String::new()
+        };
+
+        Ok(Response::new(ListKeysResponse {
+            keys: keys.iter().map(key_to_proto).collect(),
+            next_page_token,
+        }))
     }
 
-    async fn sign(&self, _request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
-        Err(Status::unimplemented("Sign is not wired yet"))
+    async fn sign(&self, request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
+        let request = request.into_inner();
+        let key_id = parse_key_id(&request.key_id)?;
+        info!(
+            key_id = %key_id,
+            has_request_id = !request.request_id.is_empty(),
+            "Sign requested"
+        );
+        let signature = self
+            .keystore
+            .sign(
+                key_id,
+                &request.payload,
+                GRPC_ACTOR,
+                Some(&request.request_id),
+            )
+            .await
+            .map_err(|error| {
+                warn!(key_id = %key_id, "Sign failed");
+                map_keystore_error(error)
+            })?;
+        info!(key_id = %key_id, "signature produced");
+
+        Ok(Response::new(SignResponse {
+            key_id: key_id.to_string(),
+            signature,
+            request_id: request.request_id,
+        }))
     }
 
     async fn start_unseal(
@@ -71,6 +187,11 @@ impl SignerService for SignerGrpc {
         _request: Request<StartUnsealRequest>,
     ) -> Result<Response<StartUnsealResponse>, Status> {
         let session = self.unseal.start_session().map_err(map_unseal_error)?;
+        info!(
+            session_id = %session.id,
+            threshold = session.threshold,
+            "unseal session started"
+        );
 
         Ok(Response::new(StartUnsealResponse {
             session_id: session.id.to_string(),
@@ -109,6 +230,12 @@ impl SignerService for SignerGrpc {
             .map_err(|_| Status::invalid_argument("share_index must be between 1 and 255"))?;
 
         let session_id = parse_session_id(&request.session_id)?;
+        debug!(
+            session_id = %session_id,
+            holder_id = %request.share_holder_id,
+            share_index,
+            "share submission"
+        );
         self.unseal
             .submit_share(
                 session_id,
@@ -120,9 +247,23 @@ impl SignerService for SignerGrpc {
                     signature: &request.signature,
                 },
             )
-            .map_err(map_unseal_error)?;
+            .map_err(|error| {
+                warn!(
+                    session_id = %session_id,
+                    holder_id = %request.share_holder_id,
+                    "share submission failed"
+                );
+                map_unseal_error(error)
+            })?;
 
         let status = self.unseal.status(session_id).map_err(map_unseal_error)?;
+        info!(
+            session_id = %status.id,
+            state = status.state.as_str(),
+            shares_collected = status.shares_collected,
+            threshold = status.threshold,
+            "share accepted"
+        );
 
         Ok(Response::new(SubmitUnsealShareResponse {
             shares_collected: i32::try_from(status.shares_collected).unwrap_or(i32::MAX),
@@ -136,6 +277,7 @@ impl SignerService for SignerGrpc {
         request: Request<GetUnsealStatusRequest>,
     ) -> Result<Response<GetUnsealStatusResponse>, Status> {
         let session_id = parse_session_id(&request.into_inner().session_id)?;
+        debug!(session_id = %session_id, "GetUnsealStatus requested");
         let status = self.unseal.status(session_id).map_err(map_unseal_error)?;
 
         Ok(Response::new(GetUnsealStatusResponse {
@@ -151,12 +293,90 @@ impl SignerService for SignerGrpc {
 
     async fn seal(&self, _request: Request<SealRequest>) -> Result<Response<SealResponse>, Status> {
         self.unseal.seal();
+        info!("service sealed; KEK and unseal sessions cleared");
         Ok(Response::new(SealResponse { sealed: true }))
     }
 }
 
 fn parse_session_id(value: &str) -> Result<Uuid, Status> {
     Uuid::parse_str(value).map_err(|_| Status::invalid_argument("session_id must be a UUID"))
+}
+
+fn parse_key_id(value: &str) -> Result<Uuid, Status> {
+    Uuid::parse_str(value).map_err(|_| Status::invalid_argument("key_id must be a UUID"))
+}
+
+fn parse_curve(value: i32) -> Result<StorageCurve, Status> {
+    match pb::Curve::try_from(value) {
+        Ok(pb::Curve::Secp256k1) => Ok(StorageCurve::Secp256k1),
+        Ok(pb::Curve::Edwards25519) => Ok(StorageCurve::Edwards25519),
+        _ => Err(Status::invalid_argument(
+            "curve must be CURVE_SECP256K1 or CURVE_EDWARDS25519",
+        )),
+    }
+}
+
+fn parse_algorithm(value: i32) -> Result<StorageAlgorithm, Status> {
+    match pb::SignatureAlgorithm::try_from(value) {
+        Ok(pb::SignatureAlgorithm::Ecdsa) => Ok(StorageAlgorithm::Ecdsa),
+        Ok(pb::SignatureAlgorithm::Eddsa) => Ok(StorageAlgorithm::EdDsa),
+        _ => Err(Status::invalid_argument(
+            "algorithm must be SIGNATURE_ALGORITHM_ECDSA or SIGNATURE_ALGORITHM_EDDSA",
+        )),
+    }
+}
+
+fn curve_to_proto(curve: StorageCurve) -> pb::Curve {
+    match curve {
+        StorageCurve::Secp256k1 => pb::Curve::Secp256k1,
+        StorageCurve::Edwards25519 => pb::Curve::Edwards25519,
+    }
+}
+
+fn algorithm_to_proto(algorithm: StorageAlgorithm) -> pb::SignatureAlgorithm {
+    match algorithm {
+        StorageAlgorithm::Ecdsa => pb::SignatureAlgorithm::Ecdsa,
+        StorageAlgorithm::EdDsa => pb::SignatureAlgorithm::Eddsa,
+    }
+}
+
+fn key_state_to_proto(state: StorageKeyState) -> i32 {
+    match state {
+        StorageKeyState::Created => pb::KeyState::Created as i32,
+        StorageKeyState::Active => pb::KeyState::Active as i32,
+        StorageKeyState::Rotating => pb::KeyState::Rotating as i32,
+        StorageKeyState::Destroyed => pb::KeyState::Destroyed as i32,
+    }
+}
+
+fn key_to_proto(key: &KeyMetadata) -> pb::Key {
+    pb::Key {
+        id: key.id.to_string(),
+        curve: curve_to_proto(key.curve) as i32,
+        algorithm: algorithm_to_proto(key.algorithm) as i32,
+        public_key: key.public_key.clone(),
+        state: key_state_to_proto(key.state),
+        created_at: timestamp(key.created_at),
+    }
+}
+
+fn map_keystore_error(error: KeystoreError) -> Status {
+    match error {
+        KeystoreError::Sealed => Status::failed_precondition("service is sealed"),
+        KeystoreError::NotFound => Status::not_found("key not found"),
+        KeystoreError::Conflict => Status::already_exists("key already exists"),
+        KeystoreError::KeyNotActive => Status::failed_precondition("key is not active"),
+        KeystoreError::Unsupported(message) => Status::unimplemented(message),
+        KeystoreError::InvalidAlgorithmPair => {
+            Status::invalid_argument("unsupported curve/algorithm pair")
+        }
+        KeystoreError::InvalidMaterial | KeystoreError::Corrupt => {
+            Status::internal("stored key is corrupt")
+        }
+        KeystoreError::Storage(_) | KeystoreError::Audit(_) | KeystoreError::Internal => {
+            Status::internal("key storage operation failed")
+        }
+    }
 }
 
 fn timestamp(value: OffsetDateTime) -> Option<Timestamp> {
@@ -218,9 +438,12 @@ fn map_unseal_error(error: UnsealError) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    use ed25519_dalek::{
+        Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey,
+    };
     use rand::RngCore;
     use rand::rngs::OsRng;
+    use signer_core::storage::SqliteStore;
     use signer_core::unseal::{HolderIndex, UnsealConfig, UnsealManager};
     use signer_share::{encrypt_share_with_context, submission_context, submission_signing_input};
     use zeroize::Zeroizing;
@@ -243,7 +466,7 @@ mod tests {
         }
     }
 
-    fn setup() -> (SignerGrpc, Vec<Zeroizing<Vec<u8>>>, Vec<TestHolder>) {
+    async fn setup() -> (SignerGrpc, Vec<Zeroizing<Vec<u8>>>, Vec<TestHolder>) {
         let test_holders: Vec<TestHolder> = (1..=3).map(TestHolder::new).collect();
         let holders: Vec<HolderIndex> = test_holders
             .iter()
@@ -255,7 +478,12 @@ mod tests {
             .collect();
         let (manager, shares, _) =
             UnsealManager::bootstrap(UnsealConfig::new(2, 3), holders).unwrap();
-        (SignerGrpc::new(Arc::new(manager)), shares, test_holders)
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        (
+            SignerGrpc::new(Arc::new(manager), store),
+            shares,
+            test_holders,
+        )
     }
 
     fn submission_request(
@@ -292,7 +520,7 @@ mod tests {
 
     #[tokio::test]
     async fn unseal_rpcs_work_end_to_end() {
-        let (service, shares, holders) = setup();
+        let (service, shares, holders) = setup().await;
 
         let start = service
             .start_unseal(Request::new(StartUnsealRequest {}))
@@ -348,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn plaintext_shares_are_rejected() {
-        let (service, shares, holders) = setup();
+        let (service, shares, holders) = setup().await;
         let start = service
             .start_unseal(Request::new(StartUnsealRequest {}))
             .await
@@ -389,7 +617,7 @@ mod tests {
 
     #[tokio::test]
     async fn nonce_and_signature_are_enforced() {
-        let (service, shares, holders) = setup();
+        let (service, shares, holders) = setup().await;
         let start = service
             .start_unseal(Request::new(StartUnsealRequest {}))
             .await
@@ -414,11 +642,112 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unwired_rpcs_report_unimplemented() {
-        let (service, _, _) = setup();
+    async fn ed25519_key_lifecycle_end_to_end() {
+        let (service, shares, holders) = setup().await;
+        let create_request = || CreateKeyRequest {
+            curve: pb::Curve::Edwards25519 as i32,
+            algorithm: pb::SignatureAlgorithm::Eddsa as i32,
+            labels: Default::default(),
+        };
 
         let error = service
-            .create_key(Request::new(CreateKeyRequest::default()))
+            .create_key(Request::new(create_request()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+        let start = service
+            .start_unseal(Request::new(StartUnsealRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        for index in 0..2 {
+            service
+                .submit_unseal_share(Request::new(submission_request(
+                    &start,
+                    &holders[index],
+                    &shares[index],
+                )))
+                .await
+                .unwrap();
+        }
+
+        let created = service
+            .create_key(Request::new(create_request()))
+            .await
+            .unwrap()
+            .into_inner();
+        let key = created.key.expect("create_key returns a key");
+        assert_eq!(key.state, pb::KeyState::Active as i32);
+        assert_eq!(key.public_key.len(), 32);
+
+        let error = service
+            .create_key(Request::new(CreateKeyRequest {
+                curve: pb::Curve::Secp256k1 as i32,
+                algorithm: pb::SignatureAlgorithm::Ecdsa as i32,
+                labels: Default::default(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unimplemented);
+
+        let payload = b"hello signer".to_vec();
+        let signed = service
+            .sign(Request::new(SignRequest {
+                key_id: key.id.clone(),
+                payload: payload.clone(),
+                request_id: "req-1".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(signed.key_id, key.id);
+        assert_eq!(signed.request_id, "req-1");
+
+        let public_key: [u8; 32] = key.public_key.as_slice().try_into().unwrap();
+        let verifying_key = VerifyingKey::from_bytes(&public_key).unwrap();
+        let signature = Ed25519Signature::from_slice(&signed.signature).unwrap();
+        verifying_key.verify(&payload, &signature).unwrap();
+
+        let fetched = service
+            .get_public_key(Request::new(GetPublicKeyRequest {
+                key_id: key.id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(fetched.public_key, key.public_key);
+
+        let listed = service
+            .list_keys(Request::new(ListKeysRequest {
+                page_size: 10,
+                page_token: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.keys.len(), 1);
+        assert_eq!(listed.keys[0].id, key.id);
+        assert!(listed.next_page_token.is_empty());
+
+        service.seal(Request::new(SealRequest {})).await.unwrap();
+        let error = service
+            .sign(Request::new(SignRequest {
+                key_id: key.id,
+                payload,
+                request_id: "req-2".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn unwired_rpcs_report_unimplemented() {
+        let (service, _, _) = setup().await;
+
+        let error = service
+            .import_key(Request::new(ImportKeyRequest::default()))
             .await
             .unwrap_err();
 
@@ -427,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_session_id_is_rejected() {
-        let (service, _, _) = setup();
+        let (service, _, _) = setup().await;
 
         let error = service
             .get_unseal_status(Request::new(GetUnsealStatusRequest {

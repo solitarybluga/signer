@@ -15,4 +15,4 @@ pub use model::{
 };
 pub use postgres::PostgresStore;
 pub use sqlite::SqliteStore;
-pub use store::{KeyStore, StorageError};
+pub use store::{KeyStore, PoolConfig, StorageError};

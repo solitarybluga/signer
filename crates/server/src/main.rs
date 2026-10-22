@@ -1,22 +1,45 @@
+mod config;
 mod grpc;
 
 use std::error::Error;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::Parser;
 use tonic::transport::Server;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
+use config::{Config as AppConfig, LogFormat, LoggingConfig};
 use grpc::SignerGrpc;
+use signer_core::storage::{KeyStore, PostgresStore, SqliteStore};
 use signer_core::unseal::{KekCheckFile, UnsealConfig, UnsealManager};
+
+#[derive(Parser)]
+#[command(name = "signer", about = "Quorum-unsealing signing service")]
+struct Cli {
+    /// Path to signer.toml.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let data_dir =
-        PathBuf::from(std::env::var("SIGNER_DATA_DIR").unwrap_or_else(|_| "data".to_string()));
+    let cli = Cli::parse();
+    let config = AppConfig::load(cli.config)?;
+    init_tracing(&config.logging)?;
+
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        data_dir = %config.server.data_dir.display(),
+        "starting signer"
+    );
+
+    let data_dir = &config.server.data_dir;
     let check_path = data_dir.join("kek_check.json");
 
     if !check_path.exists() {
+        tracing::error!(path = %check_path.display(), "KEK check not found");
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!(
@@ -30,48 +53,98 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let raw = std::fs::read(&check_path)?;
     let file: KekCheckFile = serde_json::from_slice(&raw)?;
     let (check, threshold, total_shares, vss, holders) = file.into_parts()?;
-
-    let config = UnsealConfig {
+    info!(
         threshold,
         total_shares,
-        session_ttl: session_ttl()?,
+        holders = holders.len(),
+        "loaded KEK check"
+    );
+
+    let unseal_config = UnsealConfig {
+        threshold,
+        total_shares,
+        session_ttl: config.session_ttl()?,
     };
-    let manager = UnsealManager::from_check(config, check, vss, holders)?;
+    let manager = UnsealManager::from_check(unseal_config, check, vss, holders)?;
 
-    let addr: SocketAddr = std::env::var("SIGNER_GRPC_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:50051".to_string())
-        .parse()?;
+    let is_postgres = config
+        .database
+        .url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"));
+    let pool_config = config
+        .database
+        .pool_config(if is_postgres { 10 } else { 1 })?;
 
-    eprintln!("signer gRPC listening on {addr}");
+    let store: Arc<dyn KeyStore> = match config.database.url.as_deref() {
+        Some(database_url) if is_postgres => {
+            Arc::new(PostgresStore::connect_with_pool(database_url, pool_config).await?)
+        }
+        Some(database_url) => {
+            Arc::new(SqliteStore::connect_with_pool(database_url, pool_config).await?)
+        }
+        None => Arc::new(
+            SqliteStore::connect_path_with_pool(data_dir.join("signer.db"), pool_config).await?,
+        ),
+    };
+
+    info!(
+        backend = if is_postgres { "postgres" } else { "sqlite" },
+        "initialized key store"
+    );
+
+    let addr = config.grpc_addr()?;
+    info!(%addr, "signer gRPC listening");
 
     Server::builder()
-        .add_service(SignerGrpc::new(Arc::new(manager)).into_server())
+        .add_service(SignerGrpc::new(Arc::new(manager), store).into_server())
         .serve(addr)
         .await?;
 
     Ok(())
 }
 
-fn session_ttl() -> Result<time::Duration, Box<dyn Error>> {
-    let seconds: u64 = match std::env::var("SIGNER_SESSION_TTL_SECS") {
-        Ok(value) => value.parse()?,
-        Err(_) => 600,
-    };
+fn init_tracing(config: &LoggingConfig) -> Result<(), config::ConfigError> {
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(&config.level))
+        .map_err(|_| config::ConfigError::Invalid("invalid logging.level"))?;
 
-    if seconds == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "SIGNER_SESSION_TTL_SECS must be positive",
-        )
-        .into());
+    match config.format {
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_file(config.location)
+                .with_line_number(config.location)
+                .json()
+                .init();
+        }
+        LogFormat::Text => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_file(config.location)
+                .with_line_number(config.location)
+                .init();
+        }
     }
 
-    let seconds = i64::try_from(seconds).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "SIGNER_SESSION_TTL_SECS is too large",
-        )
-    })?;
+    Ok(())
+}
 
-    Ok(time::Duration::seconds(seconds))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn default_database_path_opens() {
+        let dir = std::env::temp_dir().join(format!("signer-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = SqliteStore::connect_path(dir.join("signer.db"))
+            .await
+            .unwrap();
+        assert!(store.pool().acquire().await.is_ok());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

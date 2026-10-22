@@ -10,3 +10,5 @@
 *.share
 *.vault
 .env
+/signer.toml
+/CLAUDE.md

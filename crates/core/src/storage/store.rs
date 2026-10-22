@@ -1,9 +1,46 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 
 use super::model::{
     AuditEntry, KeyId, KeyMetadata, KeyRecord, KeyState, NewKey, Page, SessionId,
     SignatureAlgorithm, UnsealSession,
 };
+
+/// Connection pool settings shared by the SQLite and PostgreSQL stores.
+#[derive(Debug, Clone, Copy)]
+pub struct PoolConfig {
+    pub max_connections: u32,
+    pub min_connections: u32,
+    pub acquire_timeout: Duration,
+    pub idle_timeout: Option<Duration>,
+    pub max_lifetime: Option<Duration>,
+    pub sqlite_busy_timeout: Duration,
+}
+
+impl PoolConfig {
+    pub fn sqlite_default() -> Self {
+        Self {
+            max_connections: 1,
+            min_connections: 0,
+            acquire_timeout: Duration::from_secs(5),
+            idle_timeout: Some(Duration::from_secs(600)),
+            max_lifetime: Some(Duration::from_secs(1800)),
+            sqlite_busy_timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn postgres_default() -> Self {
+        Self {
+            max_connections: 10,
+            min_connections: 0,
+            acquire_timeout: Duration::from_secs(5),
+            idle_timeout: Some(Duration::from_secs(600)),
+            max_lifetime: Some(Duration::from_secs(1800)),
+            sqlite_busy_timeout: Duration::from_secs(5),
+        }
+    }
+}
 
 /// Storage-layer errors.
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +70,13 @@ pub trait KeyStore: Send + Sync {
     /// Insert a new key. Returns [`StorageError::Conflict`] if the public key
     /// already exists.
     async fn insert_key(&self, key: NewKey) -> Result<KeyRecord, StorageError>;
+
+    /// Insert a key and its audit entry atomically.
+    async fn insert_key_with_audit(
+        &self,
+        key: NewKey,
+        audit: &AuditEntry,
+    ) -> Result<KeyRecord, StorageError>;
 
     /// Load a key record (including ciphertext) by ID.
     async fn get_key(&self, id: KeyId) -> Result<Option<KeyRecord>, StorageError>;

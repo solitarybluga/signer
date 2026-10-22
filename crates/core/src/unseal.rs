@@ -1,8 +1,8 @@
 //! Quorum unsealing with Ristretto255 Feldman VSS.
 //!
-//! v0.1 keeps the unsealed KEK in process memory. Share transport encryption,
-//! holder authentication, and holder signatures are handled by the API layer in
-//! a later iteration.
+//! v0.1 keeps the unsealed KEK in process memory. Each session has an ephemeral
+//! X25519 keypair; holders encrypt and sign their submissions before the server
+//! decrypts, verifies, and counts them.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
@@ -636,6 +636,13 @@ impl UnsealManager {
     /// Return a copy of the KEK check for persistence.
     pub fn check(&self) -> KekCheck {
         self.lock().check.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_unseal_for_test(&self, kek: [u8; KEK_LEN]) {
+        self.lock().phase = Phase::Unsealed {
+            kek: Zeroizing::new(kek),
+        };
     }
 
     /// Wipe the KEK and all session shares, returning to the sealed state.

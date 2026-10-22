@@ -1,5 +1,5 @@
+use std::path::Path;
 use std::str::FromStr;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
@@ -13,7 +13,7 @@ use super::model::{
     AuditEntry, Curve, KeyId, KeyMetadata, KeyRecord, KeyState, NewKey, Page, SessionId,
     SignatureAlgorithm, UnsealSession,
 };
-use super::store::{KeyStore, StorageError};
+use super::store::{KeyStore, PoolConfig, StorageError};
 
 /// SQLite-backed storage for single-node deployments and tests.
 ///
@@ -26,14 +26,52 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Open the database (creating it if needed) and run migrations.
     pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
+        Self::connect_with_pool(database_url, PoolConfig::sqlite_default()).await
+    }
+
+    /// Open the database with explicit pool settings.
+    pub async fn connect_with_pool(
+        database_url: &str,
+        pool: PoolConfig,
+    ) -> Result<Self, StorageError> {
         let options = SqliteConnectOptions::from_str(database_url)
             .map_err(map_sqlx_error)?
             .create_if_missing(true)
             .foreign_keys(true)
-            .busy_timeout(Duration::from_secs(5));
+            .busy_timeout(pool.sqlite_busy_timeout);
 
+        Self::connect_with_options(options, pool).await
+    }
+
+    /// Open a database file path directly, avoiding URL escaping issues.
+    pub async fn connect_path(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        Self::connect_path_with_pool(path, PoolConfig::sqlite_default()).await
+    }
+
+    /// Open a database file path with explicit pool settings.
+    pub async fn connect_path_with_pool(
+        path: impl AsRef<Path>,
+        pool: PoolConfig,
+    ) -> Result<Self, StorageError> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .busy_timeout(pool.sqlite_busy_timeout);
+
+        Self::connect_with_options(options, pool).await
+    }
+
+    async fn connect_with_options(
+        options: SqliteConnectOptions,
+        pool_config: PoolConfig,
+    ) -> Result<Self, StorageError> {
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(pool_config.max_connections)
+            .min_connections(pool_config.min_connections)
+            .acquire_timeout(pool_config.acquire_timeout)
+            .idle_timeout(pool_config.idle_timeout)
+            .max_lifetime(pool_config.max_lifetime)
             .connect_with(options)
             .await
             .map_err(map_sqlx_error)?;
@@ -227,6 +265,50 @@ impl KeyStore for SqliteStore {
         KeyRecord::try_from(row)
     }
 
+    async fn insert_key_with_audit(
+        &self,
+        key: NewKey,
+        audit: &AuditEntry,
+    ) -> Result<KeyRecord, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let now = format_time(OffsetDateTime::now_utc())?;
+        let labels = format_labels(&key.labels)?;
+
+        let row = sqlx::query_as::<_, SqliteKeyRow>(INSERT_KEY)
+            .bind(key.id.to_string())
+            .bind(key.curve.as_str())
+            .bind(key.algorithm.as_str())
+            .bind(&key.public_key)
+            .bind(&key.ciphertext)
+            .bind(&key.nonce)
+            .bind(&key.wrapped_dek)
+            .bind(&key.dek_nonce)
+            .bind(key.state.as_str())
+            .bind(labels)
+            .bind(&now)
+            .bind(&now)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+        let metadata = format_labels(&audit.metadata)?;
+        sqlx::query(INSERT_AUDIT)
+            .bind(format_time(OffsetDateTime::now_utc())?)
+            .bind(&audit.actor)
+            .bind(&audit.action)
+            .bind(audit.key_id.map(|id| id.to_string()))
+            .bind(audit.session_id.map(|id| id.to_string()))
+            .bind(audit.result.as_str())
+            .bind(metadata)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+        tx.commit().await.map_err(map_sqlx_error)?;
+
+        KeyRecord::try_from(row)
+    }
+
     async fn get_key(&self, id: KeyId) -> Result<Option<KeyRecord>, StorageError> {
         let row = sqlx::query_as::<_, SqliteKeyRow>(SELECT_KEY)
             .bind(id.to_string())
@@ -338,6 +420,7 @@ impl KeyStore for SqliteStore {
     async fn append_audit(&self, entry: &AuditEntry) -> Result<(), StorageError> {
         let ts = format_time(OffsetDateTime::now_utc())?;
         let metadata = format_labels(&entry.metadata)?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
 
         sqlx::query(INSERT_AUDIT)
             .bind(ts)
@@ -347,10 +430,11 @@ impl KeyStore for SqliteStore {
             .bind(entry.session_id.map(|id| id.to_string()))
             .bind(entry.result.as_str())
             .bind(metadata)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
 
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
 }
