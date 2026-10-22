@@ -291,6 +291,13 @@
               />
             </label>
             <label class="field">
+              <span>身份文件</span>
+              <div class="picker">
+                <input id="submit-identity-path" readonly placeholder="选择 .key 文件" />
+                <button id="pick-submit-identity" class="ghost" type="button">选择…</button>
+              </div>
+            </label>
+            <label class="field">
               <span>Vault 文件</span>
               <div class="picker">
                 <input id="submit-vault-path" readonly placeholder="选择 .vault 文件" />
@@ -305,7 +312,7 @@
                 解锁并提交份额
               </button>
               <p class="note">
-                v0.1 通过本机 gRPC 明文传输解密后的份额，请只在可信环境使用。
+                提交时用身份私钥签名，并把份额加密到本次会话的临时公钥；服务端验签、解密并通过 VSS 校验后才计数。
               </p>
             </div>
           </div>

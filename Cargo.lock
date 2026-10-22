@@ -4281,6 +4281,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chacha20poly1305",
+ "ed25519-dalek",
  "hex",
  "rand 0.8.8",
  "serde",
@@ -4350,15 +4351,20 @@ name = "signer-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "ed25519-dalek",
+ "hex",
  "prost-types",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "signer-core",
  "signer-proto",
+ "signer-share",
  "time",
  "tokio",
  "tonic",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

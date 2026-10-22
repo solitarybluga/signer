@@ -18,7 +18,8 @@ Tauri 2 桌面客户端，覆盖操作员和份额持有者的完整解封流程
 
 **份额持有者 — Unseal**
 
-- 用 Session ID 从 vault 解锁并提交份额
+- 输入 Session ID、选择身份文件和 vault，解锁后提交
+- 提交前从服务端取得会话 `nonce` 与临时 X25519 公钥，把份额加密到该公钥，并用 Holder Ed25519 私钥签名
 - 查看当前会话已收集份额和阈值状态
 
 ## 运行
@@ -56,7 +57,7 @@ cargo run -p signer-admin -- init \
 
 4. 把每个 holder 的 `.share`、`manifest.json`、`manifest.sig`、`operator.pub` 交给对应 holder；通过**另一个渠道**公布 operator 公钥指纹。
 5. Holder 在桌面端「导入份额」中验证 manifest、VSS 承诺并保存到 vault。可在「operator 指纹」中填入带外核对值；提供时会强制比对，不提供时 UI 会显示实际指纹并提示带外核对。建议把 `manifest.json`、`manifest.sig`、`operator.pub` 与 vault 一起归档，便于后续审计。
-6. 解封时，Holder 在「提交份额」中粘贴 Session ID，选择 vault、输入口令并提交。
+6. 解封时，Holder 在「提交份额」中粘贴 Session ID，选择身份文件和 vault、输入口令并提交；客户端会在本地完成加密和签名。
 
 未提供 manifest 三项时，客户端按 legacy 方式导入：只校验信封和份额索引，**不验证 operator 签名，也不做 VSS 校验**。UI 会显示警告。
 
@@ -64,6 +65,6 @@ cargo run -p signer-admin -- init \
 
 - 口令输入在 WebView 中完成，调用后清空输入框；Rust 侧使用 `Zeroizing`，但无法擦除 JS/WebView 中的历史副本。只在可信设备上使用。
 - 私钥和份额通过文件路径在 Rust 侧读取，不经过 JS；文件选择使用原生对话框。
-- v0.1 的 gRPC 份额传输未加密，仅适合本机或可信网络演示。
+- 份额在客户端加密到会话临时公钥并附 Ed25519 签名，明文份额不进入 gRPC；但 gRPC 仍无 TLS/服务端认证，只适合本机或可信网络。
 - Windows 没有 0600 权限语义，文件保护依赖用户目录 ACL；Unix 下新文件以 0600 创建。
 - `bundle.active` 当前为 `false`，只支持 `cargo run`；需要安装包时再补图标和打包配置。

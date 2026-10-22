@@ -272,6 +272,7 @@ async function createIdentity() {
     byId("identity-result").textContent =
       `${view.holder_id} · 指纹 ${view.fingerprint}`;
     byId("import-identity-path").value = view.identity_path;
+    byId("submit-identity-path").value = view.identity_path;
     appendLog(`身份已生成：${view.holder_id}，公钥指纹 ${view.fingerprint}`, "ok");
     appendLog("把公开信息文件交给 operator 注册；身份文件不要离开本机", "info");
   } catch (error) {
@@ -397,11 +398,12 @@ async function submitFromVault() {
   }
 
   const sessionId = valueOf("holder-session");
+  const identityPath = valueOf("submit-identity-path");
   const vaultPath = valueOf("submit-vault-path");
   const passphrase = byId("submit-passphrase").value;
 
-  if (!sessionId || !vaultPath || !passphrase) {
-    appendLog("请填写 Session ID、选择 vault 并输入口令", "error");
+  if (!sessionId || !identityPath || !vaultPath || !passphrase) {
+    appendLog("请填写 Session ID、选择身份文件和 vault，并输入口令", "error");
     return;
   }
 
@@ -410,6 +412,7 @@ async function submitFromVault() {
     const view = await invokeCommand("holder_submit_from_vault", {
       server_url: serverUrl(),
       session_id: sessionId,
+      identity_path: identityPath,
       vault_path: vaultPath,
       passphrase,
     });
@@ -575,6 +578,9 @@ byId("pick-import-manifest-sig").addEventListener("click", () =>
 );
 byId("pick-import-operator-pub").addEventListener("click", () =>
   pickOpen("import-operator-pub-path", [{ name: "Operator public key", extensions: ["pub"] }]),
+);
+byId("pick-submit-identity").addEventListener("click", () =>
+  pickOpen("submit-identity-path", [{ name: "Holder key", extensions: ["key"] }]),
 );
 byId("pick-submit-vault").addEventListener("click", () =>
   pickOpen("submit-vault-path", [{ name: "Share vault", extensions: ["vault"] }]),

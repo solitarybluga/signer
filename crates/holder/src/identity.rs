@@ -148,6 +148,11 @@ impl HolderIdentity {
         }
     }
 
+    /// Sign a message with the holder's Ed25519 identity key.
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        self.signing_key.sign(message).to_bytes()
+    }
+
     /// Decrypt a v1 share envelope with this holder's X25519 secret.
     pub fn decrypt_share(&self, envelope: &[u8]) -> Result<Zeroizing<Vec<u8>>, HolderError> {
         let secret = Zeroizing::new(self.x25519_secret.to_bytes());
@@ -333,6 +338,19 @@ mod tests {
         assert_eq!(loaded.holder_id(), "alice");
         assert_eq!(loaded.ed25519_public(), identity.ed25519_public());
         assert_eq!(loaded.x25519_public(), identity.x25519_public());
+    }
+
+    #[test]
+    fn identity_signs_with_the_ed25519_key() {
+        use ed25519_dalek::Verifier;
+
+        let identity = HolderIdentity::generate("alice").unwrap();
+        let message = b"signer.unseal.submit";
+        let signature = ed25519_dalek::Signature::from_bytes(&identity.sign(message));
+        let verifying_key = VerifyingKey::from_bytes(&identity.ed25519_public()).unwrap();
+
+        verifying_key.verify(message, &signature).unwrap();
+        assert!(verifying_key.verify(b"other message", &signature).is_err());
     }
 
     #[test]

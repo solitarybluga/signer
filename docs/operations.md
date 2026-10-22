@@ -23,34 +23,42 @@ TODO：补充 `.env.example`，启动时校验所有配置。
 
 服务端只读取初始化结果，不会自动生成 KEK。
 
-1. 每个份额持有者在自己的机器上生成密钥对：
+1. 每个份额持有者在自己的机器上用桌面客户端生成身份（Ed25519 签名密钥 + X25519 加密密钥），并导出 public bundle。身份文件用口令加密，留在持有者本机。
 
-   ```bash
-   cargo run -p signer-admin -- holder-keygen --out holder-1.key
-   ```
-
-   `holder-1.key` 是 32 字节 X25519 私钥；私钥文件留在持有者手中，把输出的公钥交给操作员。
-
-2. 操作员将公钥写入 `holders.json`：
+2. 操作员把各持有者的 public bundle 汇总为 `holders.json`：
 
    ```json
    [
-     { "id": "holder-1", "public_key": "<hex>" },
-     { "id": "holder-2", "public_key": "<hex>" }
+     {
+       "holder_id": "holder-1",
+       "ed25519_public": "<hex>",
+       "x25519_public": "<hex>",
+       "self_signature": "<hex>",
+       "version": 1
+     },
+     {
+       "holder_id": "holder-2",
+       "ed25519_public": "<hex>",
+       "x25519_public": "<hex>",
+       "self_signature": "<hex>",
+       "version": 1
+     }
    ]
    ```
 
-   条目数量必须等于 `total_shares`。
+   条目数量必须等于 `total_shares`。旧的 X25519-only 格式会被拒绝。
 
-3. 生成 KEK、分片并导出加密份额：
+3. 生成 operator 签名密钥（离线保管私钥），然后生成 KEK、VSS 分片并导出加密份额：
 
    ```bash
-   cargo run -p signer-admin -- init --threshold 3 --total-shares 5 --holders holders.json
+   cargo run -p signer-admin -- operator-keygen --out operator.key --pub-out operator.pub
+   cargo run -p signer-admin -- init --threshold 3 --total-shares 5 \
+     --holders holders.json --operator-key operator.key
    ```
 
-   输出 `data/kek_check.json` 和 `data/shares/<holder-id>.share`。每个 `.share` 都是 X25519 信封加密的，只有对应持有者的私钥能解开。
+   输出 `data/kek_check.json` v3、`data/shares/<holder-id>.share`，以及 `manifest.json` / `manifest.sig` / `operator.pub`。每个 `.share` 都用对应持有者的 X25519 公钥加密。
 
-4. 通过离线或安全渠道把每个 `.share` 发给对应持有者；不要和 KEK 校验文件、持有者私钥放在同一处。
+4. 通过离线或安全渠道把每个 `.share` 和签名 manifest 发给对应持有者；不要和 KEK 校验文件、持有者私钥放在同一处。
 
 5. 启动 signer。缺少 `kek_check.json` 会拒绝启动。
 

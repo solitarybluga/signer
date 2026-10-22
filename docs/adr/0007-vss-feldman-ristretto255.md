@@ -19,9 +19,9 @@ v0.1 的 KEK 使用 `sharks` 的 GF(256) Shamir 分享。持有者无法验证�
   - 验证公式为 `y_i·G == Σ i^j·C_j`；
   - 恢复后验证 `s·G == C_0`，再执行 KEK check。
 - 在 `crates/vss` 中基于 `curve25519-dalek` 4.1.3 的 `RistrettoPoint` / `Scalar` 实现，不引入 `vsss-rs`。
-- 采用 clean break：`kek_check.json` v2、manifest v2、vault v2；旧 v1 数据需要重新初始化。
-- 服务端从 `kek_check.json` v2 读取 commitments 和 holder/index 注册表；manifest 作为持有者侧输入。
-- `SubmitUnsealShareRequest` 增加显式 `share_index`；0 表示回退到份额首字节。
+- 采用 clean break：`kek_check.json` v2、manifest v2、vault v2；后续安全改动将 `kek_check.json` 升到 v3（登记 Holder Ed25519 公钥），manifest/vault 仍为 v2。
+- 服务端从 `kek_check.json` 读取 commitments、holder/index 和 Ed25519 公钥；manifest 作为持有者侧输入。
+- `SubmitUnsealShareRequest` 的 `share_index` 为必填；提交携带 `encrypted_share`、`nonce` 和 Ed25519 签名，服务端验签/解密后才做 VSS 校验。
 
 ## 备选方案
 
@@ -44,9 +44,9 @@ v0.1 的 KEK 使用 `sharks` 的 GF(256) Shamir 分享。持有者无法验证�
   - 更换了分享方案，旧 ceremony 和旧 share 不兼容；
   - `crates/vss` 是自研密码学代码，需要额外的测试向量和审计；
   - `C_0` 公开 KEK 的群元素；Feldman 的隐藏性依赖离散对数假设；
-  - VSS 不认证提交者，持有者签名和 session nonce 绑定仍需实现。
+  - VSS 本身不认证提交者；后续已用 Holder Ed25519 签名、session nonce 绑定和每会话 X25519 加密补齐（gRPC TLS 仍待接入）。
 - 兼容性：
-  - 服务端拒绝 `kek_check.json` v1；
+  - 服务端拒绝 `kek_check.json` v1/v2，只接受 v3；
   - manifest v1（无 `vss`）仍可被持有者作为 legacy 导入，但不会设置 `vss_verified`。
 
 ## 参考

@@ -31,7 +31,7 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 | gRPC 解封接口（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal） | ✅ 已实现 |
 | 桌面端 Holder 身份、份额 vault 与解封提交（Tauri） | ✅ 已实现 |
 | 加密 keystore（DEK/KEK、VSS 分享） | 🚧 开发中 |
-| 份额传输加密、持有者签名 | 🚧 计划中 |
+| 份额提交加密与持有者签名 | ✅ 已实现（每会话 X25519 + Ed25519；gRPC 仍无 TLS） |
 | 密钥管理接口与签名（ECDSA / EdDSA） | 🚧 未开始 |
 
 ## v0.1 目标特性
@@ -42,6 +42,7 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 - 支持导入已有私钥（secp256k1 标量 / edwards25519 种子）
 - 份额分发：对 VSS 份额做 X25519 信封加密，每个持有者用本地私钥解密
 - 门限解封：对 KEK 做 Ristretto255 Feldman VSS 分享，逐份校验份额，并用 KEK 校验密文验证重建结果
+- 安全提交：会话 nonce 绑定、份额加密到每会话临时 X25519 公钥、持有者 Ed25519 签名，服务端验签/解密/VSS 后才计数
 - 签名：secp256k1 + ECDSA（EVM）与 edwards25519 + EdDSA（Solana）
 - gRPC 解封接口（tonic）：StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal
 - 所有密钥操作写入审计日志
@@ -70,13 +71,14 @@ flowchart LR
 先完成一次初始化仪式：
 
 ```bash
-# 1. 每个份额持有者生成自己的 X25519 密钥（在各自机器上执行）
-cargo run -p signer-admin -- holder-keygen --out holder-1.key
+# 1. 每个份额持有者在桌面客户端生成身份，并导出 public bundle
+#    （Ed25519 签名密钥 + X25519 加密密钥，口令加密保存在本机）
 
-# 2. 收集公钥到 holders.json
-#    [{"id":"holder-1","public_key":"<hex>"}, ...]
+# 2. 收集 public bundle 到 holders.json
+#    [{"holder_id":"holder-1","ed25519_public":"<hex>","x25519_public":"<hex>",
+#      "self_signature":"<hex>","version":1}, ...]
 
-# 3. 生成 operator 签名密钥（可选；桌面端验证 manifest 时需要）
+# 3. 生成 operator 签名密钥（桌面端验证 manifest 时需要）
 cargo run -p signer-admin -- operator-keygen --out operator.key --pub-out operator.pub
 
 # 4. 生成 KEK、VSS 分片并加密导出 share 文件
@@ -86,9 +88,9 @@ cargo run -p signer-admin -- init --holders holders.json --operator-key operator
 cargo run -p signer-server
 ```
 
-`holders.json` 既接受旧格式 `{"id": "...", "public_key": "<x25519 hex>"}`，也接受桌面端导出的 holder public bundle（`holder_id`、`x25519_public`、`ed25519_public`、`self_signature`）。提供 `--operator-key` 时，`init` 还会写出 `manifest.json`、`manifest.sig` 和 `operator.pub`，桌面端可据此验证份额来源。
+`holders.json` 只接受桌面端导出的 holder public bundle（`holder_id`、`x25519_public`、`ed25519_public`、`self_signature`）；旧的 X25519-only 格式会导致 `init` 报错。提供 `--operator-key` 时，`init` 还会写出 `manifest.json`、`manifest.sig` 和 `operator.pub`，桌面端可据此验证份额来源。
 
-VSS 解封使用 `kek_check.json` v2、manifest v2 和 vault v2；旧 v1 文件和旧份额不兼容，需要重新执行 `init` 并重新分发。
+VSS 解封使用 `kek_check.json` v3（包含 holder Ed25519 注册表）、manifest v2 和 vault v2；旧 v1/v2 文件和旧份额不兼容，需要重新执行 `init` 并重新分发。
 
 服务端不再自动生成 KEK；缺少 `data/kek_check.json` 会报错并提示先执行 `signer-admin init`。生成的 `data/shares/*.share` 必须交给对应持有者，`data/` 不能提交到仓库。
 
@@ -103,7 +105,7 @@ cd desktop/src-tauri
 cargo run
 ```
 
-默认连接 `http://127.0.0.1:50051`。界面顶部可在「操作员」和「份额持有者」之间切换；持有者 tab 内再分「密钥分发」和「Unseal」：前者生成身份、导出公开信息、导入并验证 `.share`、把份额加密保存为本地 vault，后者用 Session ID 从 vault 解锁提交。manifest 三项（`manifest.json`、`manifest.sig`、`operator.pub`）可选；不提供时按 legacy 方式导入并显示未验签警告。v0.1 的 gRPC 份额传输未加密，仅限本机或可信网络演示。
+默认连接 `http://127.0.0.1:50051`。界面顶部可在「操作员」和「份额持有者」之间切换；持有者 tab 内再分「密钥分发」和「Unseal」：前者生成身份、导出公开信息、导入并验证 `.share`、把份额加密保存为本地 vault，后者用身份文件 + vault 解锁，把份额加密到会话临时公钥并用 Ed25519 签名后提交。manifest 三项（`manifest.json`、`manifest.sig`、`operator.pub`）可选；不提供时按 legacy 方式导入并显示未验签警告。gRPC 尚无 TLS/服务端认证，仅限本机或可信网络使用。
 
 ## 仓库结构
 

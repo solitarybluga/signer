@@ -20,3 +20,10 @@ time.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
+rand.workspace = true
+signer-share = { path = "../share" }
+zeroize.workspace = true

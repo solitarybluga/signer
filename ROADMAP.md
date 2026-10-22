@@ -6,13 +6,14 @@
 - [ ] 导入已有私钥（secp256k1 标量 / edwards25519 种子）
 - [ ] 每密钥 DEK + KEK 信封加密（XChaCha20-Poly1305）
 - [x] KEK 生成与加密 share 文件分发（signer-admin）
-- [x] Shamir 分片与 KEK 校验
+- [x] Ristretto255 Feldman VSS 分片、逐份校验与 KEK 校验
 - [x] 解封会话、份额收集与 KEK 恢复（核心）
-- [ ] 持有者签名与 VSS 校验；gRPC 份额传输加密
-- [x] 通过 gRPC 接入启动解封流程
-- [ ] gRPC 接口：`CreateKey`、`GetPublicKey`、`ListKeys`、`Sign`、`StartUnseal`、`SubmitUnsealShare`、`GetUnsealStatus`、`Seal`
+- [x] 持有者 Ed25519 签名、会话 nonce 绑定、每会话 X25519 份额加密与 VSS 校验
+- [ ] gRPC TLS/mTLS 与服务端认证
+- [x] 通过 gRPC 接入解封流程（`StartUnseal` / `SubmitUnsealShare` / `GetUnsealStatus` / `Seal`）
+- [ ] gRPC 接口：`CreateKey`、`GetPublicKey`、`ListKeys`、`Sign`
 - [ ] 审计日志
-- [ ] SQLite 存储后端
+- [x] SQLite 存储后端
 - [ ] 基于 anvil 与 Solana 测试验证器的集成测试
 
 ## v0.2 — 生产化加固

@@ -9,9 +9,11 @@ use std::sync::{Mutex, MutexGuard};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use ed25519_dalek::{Signature, VerifyingKey};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use signer_share::HolderKeypair;
 use signer_vss::{self, VssCommitments};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
@@ -24,16 +26,33 @@ const KEK_LEN: usize = 32;
 const CHECK_NONCE_LEN: usize = 24;
 const CHECK_PLAINTEXT: &[u8] = b"signer-kek-check-v1";
 const CHECK_AAD: &[u8] = b"signer.kek.check.v1";
-const KEK_CHECK_VERSION: u8 = 2;
+const KEK_CHECK_VERSION: u8 = 3;
 
 /// Unseal session identifier.
 pub type SessionId = Uuid;
 
-/// Holder registration entry used for share-index binding.
+/// Holder registration entry used for share-index and signature binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HolderIndex {
     pub id: String,
     pub index: u8,
+    /// Hex-encoded Ed25519 public key used to authenticate submissions.
+    pub ed25519_public: String,
+}
+
+#[derive(Debug, Clone)]
+struct HolderRegistration {
+    index: u8,
+    verifying_key: VerifyingKey,
+}
+
+/// One encrypted, signed share submission.
+pub struct ShareSubmission<'a> {
+    pub holder_id: &'a str,
+    pub share_index: Option<u8>,
+    pub nonce: &'a [u8],
+    pub ciphertext: &'a [u8],
+    pub signature: &'a [u8],
 }
 
 /// State of an unseal session.
@@ -209,6 +228,7 @@ impl UnsealConfig {
 pub struct SessionInfo {
     pub id: SessionId,
     pub nonce: [u8; 32],
+    pub session_public_key: [u8; 32],
     pub threshold: u8,
     pub shares_collected: u32,
     pub state: SessionState,
@@ -258,6 +278,12 @@ pub enum UnsealError {
     #[error("share index does not match the holder registration")]
     IndexMismatch,
 
+    #[error("session nonce does not match")]
+    InvalidNonce,
+
+    #[error("share holder signature is invalid")]
+    InvalidSignature,
+
     #[error("invalid share: {0}")]
     InvalidShare(String),
 
@@ -282,6 +308,8 @@ struct VerifiedShare {
 struct Session {
     id: SessionId,
     nonce: [u8; 32],
+    session_keypair: HolderKeypair,
+    session_public_key: [u8; 32],
     threshold: u8,
     shares: HashMap<String, VerifiedShare>,
     shares_collected: u32,
@@ -294,6 +322,7 @@ impl Session {
         SessionInfo {
             id: self.id,
             nonce: self.nonce,
+            session_public_key: self.session_public_key,
             threshold: self.threshold,
             shares_collected: self.shares_collected,
             state: self.state,
@@ -312,7 +341,7 @@ struct Inner {
     sessions: HashMap<SessionId, Session>,
     check: KekCheck,
     vss: VssCommitments,
-    holders: HashMap<String, u8>,
+    holders: HashMap<String, HolderRegistration>,
 }
 
 /// Result of bootstrapping a ceremony: sealed manager, plaintext shares, and commitments.
@@ -394,9 +423,13 @@ impl UnsealManager {
             return Err(UnsealError::AlreadyUnsealed);
         }
 
+        let session_keypair = HolderKeypair::generate();
+        let session_public_key = *session_keypair.public_bytes();
         let session = Session {
             id: Uuid::new_v4(),
             nonce: random_array::<32>(),
+            session_keypair,
+            session_public_key,
             threshold: self.config.threshold,
             shares: HashMap::new(),
             shares_collected: 0,
@@ -408,35 +441,29 @@ impl UnsealManager {
         Ok(info)
     }
 
-    /// Submit one share for a session.
+    /// Submit one encrypted, signed share for a session.
     ///
-    /// Share transport encryption and holder authentication are enforced by the
-    /// API layer; this method verifies the holder registration and VSS
-    /// consistency before counting the share.
+    /// The submission must be bound to the session nonce, signed by the
+    /// registered holder Ed25519 key, and encrypted to the session X25519 key.
     pub fn submit_share(
         &self,
         session_id: SessionId,
-        holder_id: &str,
-        share_index: Option<u8>,
-        share_bytes: &[u8],
+        submission: ShareSubmission<'_>,
     ) -> Result<UnsealOutcome, UnsealError> {
-        if holder_id.is_empty() {
+        if submission.holder_id.is_empty() {
             return Err(UnsealError::InvalidShare("holder id is empty".into()));
         }
-        if share_bytes.len() != signer_vss::SHARE_LEN {
-            return Err(UnsealError::InvalidShare(
-                "share must be exactly 33 bytes".into(),
-            ));
+        if submission.nonce.len() != 32 {
+            return Err(UnsealError::InvalidNonce);
         }
-
-        let embedded_index = share_bytes[0];
-        if embedded_index == 0 {
+        if submission.signature.len() != 64 {
+            return Err(UnsealError::InvalidSignature);
+        }
+        let requested_index = submission
+            .share_index
+            .ok_or_else(|| UnsealError::InvalidShare("share_index is required".into()))?;
+        if requested_index == 0 {
             return Err(UnsealError::InvalidShare("share index is zero".into()));
-        }
-        if let Some(index) = share_index {
-            if index != embedded_index {
-                return Err(UnsealError::IndexMismatch);
-            }
         }
 
         let mut inner = self.lock();
@@ -444,18 +471,16 @@ impl UnsealManager {
             return Err(UnsealError::AlreadyUnsealed);
         }
 
-        let registered_index = *inner
+        let registration = inner
             .holders
-            .get(holder_id)
-            .ok_or_else(|| UnsealError::UnknownHolder(holder_id.to_string()))?;
-        if embedded_index != registered_index {
+            .get(submission.holder_id)
+            .cloned()
+            .ok_or_else(|| UnsealError::UnknownHolder(submission.holder_id.to_string()))?;
+        if requested_index != registration.index {
             return Err(UnsealError::IndexMismatch);
         }
 
         let vss = inner.vss.clone();
-        signer_vss::verify_share(&vss, share_bytes)
-            .map_err(|error| UnsealError::VssRejected(error.to_string()))?;
-
         let check = inner.check.clone();
         let kek = {
             let session = inner
@@ -471,23 +496,65 @@ impl UnsealManager {
                 session.shares.clear();
                 return Err(UnsealError::SessionExpired);
             }
+            if submission.nonce != session.nonce {
+                return Err(UnsealError::InvalidNonce);
+            }
 
-            if session.shares.contains_key(holder_id) {
-                return Err(UnsealError::DuplicateHolder(holder_id.to_string()));
+            if session.shares.contains_key(submission.holder_id) {
+                return Err(UnsealError::DuplicateHolder(
+                    submission.holder_id.to_string(),
+                ));
             }
             if session
                 .shares
                 .values()
-                .any(|share| share.index == embedded_index)
+                .any(|share| share.index == requested_index)
             {
-                return Err(UnsealError::DuplicateIndex(embedded_index));
+                return Err(UnsealError::DuplicateIndex(requested_index));
             }
 
+            let context = signer_share::submission_context(
+                &session.id.to_string(),
+                &session.nonce,
+                &session.session_public_key,
+                submission.holder_id,
+                requested_index,
+            )
+            .map_err(|_| UnsealError::Internal("failed to build submission context".into()))?;
+
+            let signing_input =
+                signer_share::submission_signing_input(&context, submission.ciphertext);
+            let signature = Signature::from_slice(submission.signature)
+                .map_err(|_| UnsealError::InvalidSignature)?;
+            registration
+                .verifying_key
+                .verify_strict(&signing_input, &signature)
+                .map_err(|_| UnsealError::InvalidSignature)?;
+
+            let session_secret = Zeroizing::new(*session.session_keypair.secret_bytes());
+            let plaintext = signer_share::decrypt_share_with_context(
+                &session_secret,
+                submission.ciphertext,
+                &context,
+            )
+            .map_err(|_| UnsealError::InvalidShare("failed to decrypt share".into()))?;
+
+            if plaintext.len() != signer_vss::SHARE_LEN {
+                return Err(UnsealError::InvalidShare(
+                    "decrypted share must be exactly 33 bytes".into(),
+                ));
+            }
+            if plaintext[0] != requested_index {
+                return Err(UnsealError::IndexMismatch);
+            }
+            signer_vss::verify_share(&vss, &plaintext)
+                .map_err(|error| UnsealError::VssRejected(error.to_string()))?;
+
             session.shares.insert(
-                holder_id.to_string(),
+                submission.holder_id.to_string(),
                 VerifiedShare {
-                    index: embedded_index,
-                    data: Zeroizing::new(share_bytes.to_vec()),
+                    index: requested_index,
+                    data: plaintext,
                 },
             );
             session.shares_collected = session.shares.len() as u32;
@@ -588,7 +655,7 @@ impl UnsealManager {
 fn validate_holders(
     total_shares: u8,
     holders: &[HolderIndex],
-) -> Result<HashMap<String, u8>, UnsealError> {
+) -> Result<HashMap<String, HolderRegistration>, UnsealError> {
     if holders.len() != total_shares as usize {
         return Err(UnsealError::InvalidConfig(
             "holder registry size does not match total_shares",
@@ -611,7 +678,23 @@ fn validate_holders(
                 "duplicate holder id or index in registry",
             ));
         }
-        map.insert(holder.id.clone(), holder.index);
+
+        let key_bytes: [u8; 32] = hex::decode(holder.ed25519_public.trim())
+            .map_err(|_| UnsealError::InvalidConfig("invalid holder Ed25519 public key"))?
+            .try_into()
+            .map_err(|_| {
+                UnsealError::InvalidConfig("holder Ed25519 public key must be 32 bytes")
+            })?;
+        let verifying_key = VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|_| UnsealError::InvalidConfig("invalid holder Ed25519 public key"))?;
+
+        map.insert(
+            holder.id.clone(),
+            HolderRegistration {
+                index: holder.index,
+                verifying_key,
+            },
+        );
     }
 
     Ok(map)
@@ -690,34 +773,118 @@ mod hex_bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use signer_share::{HolderKeypair, decrypt_share, encrypt_share};
+    use ed25519_dalek::Signer;
+    use signer_share::{
+        HolderKeypair, decrypt_share, encrypt_share, encrypt_share_with_context,
+        submission_context, submission_signing_input,
+    };
 
-    fn holders(total: u8) -> Vec<HolderIndex> {
-        (1..=total)
-            .map(|index| HolderIndex {
-                id: format!("holder-{index}"),
-                index,
-            })
-            .collect()
+    struct TestHolder {
+        id: String,
+        index: u8,
+        signing_key: ed25519_dalek::SigningKey,
     }
 
-    fn manager() -> (
-        UnsealManager,
-        Vec<Zeroizing<Vec<u8>>>,
-        VssCommitments,
-        Vec<HolderIndex>,
-    ) {
-        let holders = holders(3);
+    impl TestHolder {
+        fn new(index: u8) -> Self {
+            let seed = random_array::<32>();
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+            Self {
+                id: format!("holder-{index}"),
+                index,
+                signing_key,
+            }
+        }
+
+        fn holder_index(&self) -> HolderIndex {
+            HolderIndex {
+                id: self.id.clone(),
+                index: self.index,
+                ed25519_public: hex::encode(self.signing_key.verifying_key().to_bytes()),
+            }
+        }
+    }
+
+    struct TestManager {
+        manager: UnsealManager,
+        shares: Vec<Zeroizing<Vec<u8>>>,
+        commitments: VssCommitments,
+        holders: Vec<HolderIndex>,
+        signers: Vec<TestHolder>,
+    }
+
+    fn test_holders(total: u8) -> Vec<TestHolder> {
+        (1..=total).map(TestHolder::new).collect()
+    }
+
+    fn manager_for(threshold: u8, total: u8) -> TestManager {
+        let signers = test_holders(total);
+        let holders: Vec<HolderIndex> = signers.iter().map(TestHolder::holder_index).collect();
         let (manager, shares, commitments) =
-            UnsealManager::bootstrap(UnsealConfig::new(2, 3), holders.clone()).unwrap();
-        (manager, shares, commitments, holders)
+            UnsealManager::bootstrap(UnsealConfig::new(threshold, total), holders.clone()).unwrap();
+        TestManager {
+            manager,
+            shares,
+            commitments,
+            holders,
+            signers,
+        }
+    }
+
+    fn manager() -> TestManager {
+        manager_for(2, 3)
+    }
+
+    fn encrypted_submission(
+        holder: &TestHolder,
+        session: &SessionInfo,
+        share: &[u8],
+    ) -> (Vec<u8>, Vec<u8>) {
+        let context = submission_context(
+            &session.id.to_string(),
+            &session.nonce,
+            &session.session_public_key,
+            &holder.id,
+            holder.index,
+        )
+        .unwrap();
+        let ciphertext =
+            encrypt_share_with_context(&session.session_public_key, share, &context).unwrap();
+        let signing_input = submission_signing_input(&context, &ciphertext);
+        let signature = holder.signing_key.sign(&signing_input).to_bytes().to_vec();
+        (ciphertext, signature)
+    }
+
+    fn submit(
+        manager: &UnsealManager,
+        session: &SessionInfo,
+        holder: &TestHolder,
+        share: &[u8],
+    ) -> Result<UnsealOutcome, UnsealError> {
+        let (ciphertext, signature) = encrypted_submission(holder, session, share);
+        manager.submit_share(
+            session.id,
+            ShareSubmission {
+                holder_id: &holder.id,
+                share_index: Some(holder.index),
+                nonce: &session.nonce,
+                ciphertext: &ciphertext,
+                signature: &signature,
+            },
+        )
     }
 
     #[test]
     fn kek_check_file_roundtrip() {
-        let (manager, _, commitments, holders) = manager();
-        let check = manager.check();
-        let file = KekCheckFile::from_check(&check, 2, 3, commitments.clone(), holders.clone());
+        let fixture = manager();
+        let check = fixture.manager.check();
+        let file = KekCheckFile::from_check(
+            &check,
+            2,
+            3,
+            fixture.commitments.clone(),
+            fixture.holders.clone(),
+        );
         let encoded = serde_json::to_vec(&file).unwrap();
         let decoded: KekCheckFile = serde_json::from_slice(&encoded).unwrap();
         let (decoded_check, threshold, total_shares, decoded_vss, decoded_holders) =
@@ -726,14 +893,25 @@ mod tests {
         assert_eq!(threshold, 2);
         assert_eq!(total_shares, 3);
         assert_eq!(decoded_check.ciphertext(), check.ciphertext());
-        assert_eq!(decoded_vss, commitments);
-        assert_eq!(decoded_holders, holders);
+        assert_eq!(decoded_vss, fixture.commitments);
+        assert_eq!(decoded_holders, fixture.holders);
+        assert!(
+            decoded_holders
+                .iter()
+                .all(|holder| !holder.ed25519_public.is_empty())
+        );
     }
 
     #[test]
     fn old_kek_check_version_is_rejected() {
-        let (manager, _, commitments, holders) = manager();
-        let mut file = KekCheckFile::from_check(&manager.check(), 2, 3, commitments, holders);
+        let fixture = manager();
+        let mut file = KekCheckFile::from_check(
+            &fixture.manager.check(),
+            2,
+            3,
+            fixture.commitments.clone(),
+            fixture.holders.clone(),
+        );
         file.version = 1;
         assert!(matches!(
             file.into_parts(),
@@ -755,79 +933,83 @@ mod tests {
 
     #[test]
     fn encrypted_share_envelopes_unseal() {
-        let config = UnsealConfig::new(2, 3);
-        let holders = holders(3);
-        let (manager, shares, commitments) =
-            UnsealManager::bootstrap(config.clone(), holders.clone()).unwrap();
-        let check = manager.check();
-        let recipient_keys: Vec<HolderKeypair> = (0..shares.len())
+        let fixture = manager();
+        let session = fixture.manager.start_session().unwrap();
+        let recipient_keys: Vec<HolderKeypair> = fixture
+            .shares
+            .iter()
             .map(|_| HolderKeypair::generate())
             .collect();
 
-        let envelopes: Vec<Vec<u8>> = shares
+        let envelopes: Vec<Vec<u8>> = fixture
+            .shares
             .iter()
             .zip(&recipient_keys)
-            .map(|(share, holder)| encrypt_share(holder.public_bytes(), share).unwrap())
+            .map(|(share, holder)| encrypt_share(holder.public_bytes(), &share[..]).unwrap())
             .collect();
 
-        let manager = UnsealManager::from_check(config, check, commitments, holders).unwrap();
-        let session = manager.start_session().unwrap();
-
-        for (index, holder) in recipient_keys.iter().take(2).enumerate() {
-            let share = decrypt_share(holder.secret_bytes(), &envelopes[index]).unwrap();
-            manager
-                .submit_share(
-                    session.id,
-                    &format!("holder-{}", index + 1),
-                    Some((index + 1) as u8),
-                    share.as_slice(),
-                )
-                .unwrap();
+        for index in 0..2 {
+            let share =
+                decrypt_share(recipient_keys[index].secret_bytes(), &envelopes[index]).unwrap();
+            submit(
+                &fixture.manager,
+                &session,
+                &fixture.signers[index],
+                &share[..],
+            )
+            .unwrap();
         }
 
-        assert!(manager.is_unsealed());
+        assert!(fixture.manager.is_unsealed());
     }
 
     #[test]
     fn bootstrap_generates_the_requested_shares() {
-        let (manager, shares, commitments, holders) = manager();
-        assert_eq!(shares.len(), 3);
-        assert_eq!(commitments.len(), 2);
-        assert_eq!(holders.len(), 3);
-        assert!(shares.iter().all(|share| share.len() == 33));
-        assert!(!manager.is_unsealed());
+        let fixture = manager();
+        assert_eq!(fixture.shares.len(), 3);
+        assert_eq!(fixture.commitments.len(), 2);
+        assert_eq!(fixture.holders.len(), 3);
+        assert!(fixture.shares.iter().all(|share| share.len() == 33));
+        assert!(!fixture.manager.is_unsealed());
     }
 
     #[test]
     fn rejects_invalid_configuration() {
-        let three = holders(3);
+        let signers = test_holders(3);
+        let holders: Vec<HolderIndex> = signers.iter().map(TestHolder::holder_index).collect();
+
         assert!(matches!(
-            UnsealManager::bootstrap(UnsealConfig::new(0, 3), three.clone()),
+            UnsealManager::bootstrap(UnsealConfig::new(0, 3), holders.clone()),
             Err(UnsealError::InvalidConfig(_))
         ));
         assert!(matches!(
-            UnsealManager::bootstrap(UnsealConfig::new(4, 3), three.clone()),
+            UnsealManager::bootstrap(UnsealConfig::new(4, 3), holders.clone()),
             Err(UnsealError::InvalidConfig(_))
         ));
 
         let mut config = UnsealConfig::new(2, 3);
         config.session_ttl = Duration::ZERO;
         assert!(matches!(
-            UnsealManager::bootstrap(config, three),
+            UnsealManager::bootstrap(config, holders),
             Err(UnsealError::InvalidConfig(_))
         ));
     }
 
     #[test]
     fn unseals_at_threshold_and_seals_again() {
-        let (manager, shares, _, _) = manager();
-        let session = manager.start_session().unwrap();
+        let fixture = manager();
+        let session = fixture.manager.start_session().unwrap();
         assert_eq!(session.threshold, 2);
         assert_eq!(session.nonce.len(), 32);
+        assert_eq!(session.session_public_key.len(), 32);
 
-        let outcome = manager
-            .submit_share(session.id, "holder-1", None, shares[0].as_slice())
-            .unwrap();
+        let outcome = submit(
+            &fixture.manager,
+            &session,
+            &fixture.signers[0],
+            &fixture.shares[0][..],
+        )
+        .unwrap();
         assert_eq!(
             outcome,
             UnsealOutcome::Collected {
@@ -836,104 +1018,223 @@ mod tests {
             }
         );
         assert_eq!(
-            manager.status(session.id).unwrap().state,
+            fixture.manager.status(session.id).unwrap().state,
             SessionState::Collecting
         );
 
-        let outcome = manager
-            .submit_share(session.id, "holder-2", None, shares[1].as_slice())
-            .unwrap();
+        let outcome = submit(
+            &fixture.manager,
+            &session,
+            &fixture.signers[1],
+            &fixture.shares[1][..],
+        )
+        .unwrap();
         assert_eq!(outcome, UnsealOutcome::Unsealed);
-        assert!(manager.is_unsealed());
-        assert_eq!(manager.with_kek(|kek| kek.len()).unwrap(), KEK_LEN);
+        assert!(fixture.manager.is_unsealed());
+        assert_eq!(fixture.manager.with_kek(|kek| kek.len()).unwrap(), KEK_LEN);
 
-        manager.seal();
-        assert!(!manager.is_unsealed());
-        assert!(matches!(manager.with_kek(|_| ()), Err(UnsealError::Sealed)));
+        fixture.manager.seal();
+        assert!(!fixture.manager.is_unsealed());
+        assert!(matches!(
+            fixture.manager.with_kek(|_| ()),
+            Err(UnsealError::Sealed)
+        ));
     }
 
     #[test]
     fn rejects_duplicate_holders() {
-        let (manager, shares, _, _) = manager();
-        let session = manager.start_session().unwrap();
+        let fixture = manager();
+        let session = fixture.manager.start_session().unwrap();
 
-        manager
-            .submit_share(session.id, "holder-1", None, shares[0].as_slice())
-            .unwrap();
-        let err = manager
-            .submit_share(session.id, "holder-1", None, shares[0].as_slice())
-            .unwrap_err();
+        submit(
+            &fixture.manager,
+            &session,
+            &fixture.signers[0],
+            &fixture.shares[0][..],
+        )
+        .unwrap();
+        let err = submit(
+            &fixture.manager,
+            &session,
+            &fixture.signers[0],
+            &fixture.shares[0][..],
+        )
+        .unwrap_err();
 
         assert!(matches!(err, UnsealError::DuplicateHolder(_)));
-        assert_eq!(manager.status(session.id).unwrap().shares_collected, 1);
+        assert_eq!(
+            fixture.manager.status(session.id).unwrap().shares_collected,
+            1
+        );
     }
 
     #[test]
     fn rejects_wrong_shares_and_stays_collecting() {
-        let (subject, _, _, _) = manager();
-        let (_, other_shares, _, _) = manager();
-        let session = subject.start_session().unwrap();
+        let subject = manager();
+        let other = manager();
+        let session = subject.manager.start_session().unwrap();
 
-        let err = subject
-            .submit_share(session.id, "holder-1", None, other_shares[0].as_slice())
-            .unwrap_err();
+        let err = submit(
+            &subject.manager,
+            &session,
+            &subject.signers[0],
+            &other.shares[0][..],
+        )
+        .unwrap_err();
         assert!(matches!(err, UnsealError::VssRejected(_)));
-        assert!(!subject.is_unsealed());
-        let status = subject.status(session.id).unwrap();
+        assert!(!subject.manager.is_unsealed());
+        let status = subject.manager.status(session.id).unwrap();
         assert_eq!(status.state, SessionState::Collecting);
         assert_eq!(status.shares_collected, 0);
     }
 
     #[test]
-    fn rejects_invalid_share_bytes_unknown_sessions_and_unknown_holders() {
-        let (manager, shares, _, _) = manager();
-        let session = manager.start_session().unwrap();
-
-        let err = manager
-            .submit_share(session.id, "holder-1", None, &[0u8; 1])
-            .unwrap_err();
-        assert!(matches!(err, UnsealError::InvalidShare(_)));
-
-        let err = manager
-            .submit_share(Uuid::new_v4(), "holder-1", None, shares[0].as_slice())
-            .unwrap_err();
-        assert!(matches!(err, UnsealError::SessionNotFound));
-
-        let err = manager
-            .submit_share(session.id, "mallory", None, shares[0].as_slice())
-            .unwrap_err();
+    fn rejects_unknown_holder_and_session() {
+        let fixture = manager();
+        let session = fixture.manager.start_session().unwrap();
+        let outsider = TestHolder::new(4);
+        let err = submit(
+            &fixture.manager,
+            &session,
+            &outsider,
+            &fixture.shares[0][..],
+        )
+        .unwrap_err();
         assert!(matches!(err, UnsealError::UnknownHolder(_)));
+
+        let other = manager();
+        let foreign_session = other.manager.start_session().unwrap();
+        let err = submit(
+            &fixture.manager,
+            &foreign_session,
+            &fixture.signers[0],
+            &fixture.shares[0][..],
+        )
+        .unwrap_err();
+        assert!(matches!(err, UnsealError::SessionNotFound));
+    }
+
+    #[test]
+    fn rejects_invalid_nonce_and_signature() {
+        let fixture = manager();
+        let session = fixture.manager.start_session().unwrap();
+        let (ciphertext, signature) =
+            encrypted_submission(&fixture.signers[0], &session, &fixture.shares[0][..]);
+
+        let err = fixture
+            .manager
+            .submit_share(
+                session.id,
+                ShareSubmission {
+                    holder_id: &fixture.signers[0].id,
+                    share_index: Some(1),
+                    nonce: &[0u8; 32],
+                    ciphertext: &ciphertext,
+                    signature: &signature,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, UnsealError::InvalidNonce));
+
+        let mut bad_signature = signature.clone();
+        bad_signature[0] ^= 1;
+        let err = fixture
+            .manager
+            .submit_share(
+                session.id,
+                ShareSubmission {
+                    holder_id: &fixture.signers[0].id,
+                    share_index: Some(1),
+                    nonce: &session.nonce,
+                    ciphertext: &ciphertext,
+                    signature: &bad_signature,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, UnsealError::InvalidSignature));
     }
 
     #[test]
     fn rejects_index_mismatch() {
-        let (manager, shares, _, _) = manager();
-        let session = manager.start_session().unwrap();
+        let fixture = manager();
+        let session = fixture.manager.start_session().unwrap();
+        let (ciphertext, signature) =
+            encrypted_submission(&fixture.signers[0], &session, &fixture.shares[1][..]);
 
-        let err = manager
-            .submit_share(session.id, "holder-1", None, shares[1].as_slice())
+        let err = fixture
+            .manager
+            .submit_share(
+                session.id,
+                ShareSubmission {
+                    holder_id: &fixture.signers[0].id,
+                    share_index: Some(1),
+                    nonce: &session.nonce,
+                    ciphertext: &ciphertext,
+                    signature: &signature,
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, UnsealError::IndexMismatch));
 
-        let err = manager
-            .submit_share(session.id, "holder-1", Some(2), shares[0].as_slice())
+        let err = fixture
+            .manager
+            .submit_share(
+                session.id,
+                ShareSubmission {
+                    holder_id: &fixture.signers[0].id,
+                    share_index: Some(2),
+                    nonce: &session.nonce,
+                    ciphertext: &ciphertext,
+                    signature: &signature,
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, UnsealError::IndexMismatch));
     }
 
     #[test]
+    fn rejects_invalid_decrypted_share_length() {
+        let fixture = manager();
+        let session = fixture.manager.start_session().unwrap();
+        let (ciphertext, signature) = encrypted_submission(&fixture.signers[0], &session, &[1u8]);
+
+        let err = fixture
+            .manager
+            .submit_share(
+                session.id,
+                ShareSubmission {
+                    holder_id: &fixture.signers[0].id,
+                    share_index: Some(1),
+                    nonce: &session.nonce,
+                    ciphertext: &ciphertext,
+                    signature: &signature,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, UnsealError::InvalidShare(_)));
+    }
+
+    #[test]
     fn cannot_start_another_session_once_unsealed() {
-        let (manager, shares, _, _) = manager();
-        let session = manager.start_session().unwrap();
-        manager
-            .submit_share(session.id, "holder-1", None, shares[0].as_slice())
-            .unwrap();
-        manager
-            .submit_share(session.id, "holder-2", None, shares[1].as_slice())
-            .unwrap();
+        let fixture = manager();
+        let session = fixture.manager.start_session().unwrap();
+        submit(
+            &fixture.manager,
+            &session,
+            &fixture.signers[0],
+            &fixture.shares[0][..],
+        )
+        .unwrap();
+        submit(
+            &fixture.manager,
+            &session,
+            &fixture.signers[1],
+            &fixture.shares[1][..],
+        )
+        .unwrap();
 
         assert!(matches!(
-            manager.start_session(),
+            fixture.manager.start_session(),
             Err(UnsealError::AlreadyUnsealed)
         ));
     }

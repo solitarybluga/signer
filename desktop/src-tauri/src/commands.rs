@@ -16,6 +16,7 @@ use signer_proto::pb::signer_service_client::SignerServiceClient;
 pub struct SessionView {
     pub session_id: String,
     pub nonce_hex: String,
+    pub session_public_key_hex: String,
     pub threshold: i32,
     pub shares_collected: i32,
     pub state: String,
@@ -27,6 +28,7 @@ impl SessionView {
         Self {
             session_id: response.session_id,
             nonce_hex: hex::encode(response.nonce),
+            session_public_key_hex: hex::encode(response.session_public_key),
             threshold: response.threshold,
             shares_collected: response.shares_collected,
             state: "collecting".to_string(),
@@ -37,7 +39,8 @@ impl SessionView {
     fn from_status(response: pb::GetUnsealStatusResponse) -> Self {
         Self {
             session_id: response.session_id,
-            nonce_hex: String::new(),
+            nonce_hex: hex::encode(response.nonce),
+            session_public_key_hex: hex::encode(response.session_public_key),
             threshold: response.threshold,
             shares_collected: response.shares_collected,
             state: state_name(response.state),
@@ -138,35 +141,6 @@ async fn connect(server_url: &str) -> Result<SignerServiceClient<Channel>, Strin
         .map_err(|error| format!("failed to connect to signer: {error}"))
 }
 
-async fn submit_share_bytes(
-    server_url: &str,
-    session_id: String,
-    holder_id: String,
-    share_index: Option<u8>,
-    share: Vec<u8>,
-) -> Result<SessionView, String> {
-    let mut client = connect(server_url).await?;
-
-    client
-        .submit_unseal_share(pb::SubmitUnsealShareRequest {
-            session_id: session_id.clone(),
-            share_holder_id: holder_id,
-            share,
-            signature: Vec::new(),
-            share_index: share_index.map(u32::from).unwrap_or(0),
-        })
-        .await
-        .map_err(grpc_error)?;
-
-    let status = client
-        .get_unseal_status(pb::GetUnsealStatusRequest { session_id })
-        .await
-        .map_err(grpc_error)?
-        .into_inner();
-
-    Ok(SessionView::from_status(status))
-}
-
 #[tauri::command(rename_all = "snake_case")]
 pub async fn start_unseal(server_url: String) -> Result<SessionView, String> {
     let mut client = connect(&server_url).await?;
@@ -201,28 +175,6 @@ pub async fn seal(server_url: String) -> Result<bool, String> {
         .into_inner();
 
     Ok(response.sealed)
-}
-
-/// Legacy command kept for existing callers. New UI uses the holder vault flow.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn submit_share(
-    server_url: String,
-    session_id: String,
-    holder_id: String,
-    share_envelope: Vec<u8>,
-    holder_secret: Vec<u8>,
-) -> Result<SessionView, String> {
-    let holder_secret = Zeroizing::new(holder_secret);
-    let secret: [u8; 32] = holder_secret
-        .as_slice()
-        .try_into()
-        .map_err(|_| "holder secret must be 32 bytes".to_string())?;
-    let secret = Zeroizing::new(secret);
-
-    let share = signer_share::decrypt_share(&secret, &share_envelope)
-        .map_err(|error| format!("failed to decrypt share: {error}"))?;
-
-    submit_share_bytes(&server_url, session_id, holder_id, None, share.to_vec()).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -374,24 +326,84 @@ pub fn holder_vault_info(vault_path: String) -> Result<VaultInfo, String> {
 pub async fn holder_submit_from_vault(
     server_url: String,
     session_id: String,
+    identity_path: String,
     vault_path: String,
     passphrase: String,
 ) -> Result<SessionView, String> {
-    let passphrase = Zeroizing::new(passphrase);
+    let mut client = connect(&server_url).await?;
 
-    let (info, share) = blocking(move || {
-        ShareVault::open(Path::new(&vault_path), &passphrase).map_err(holder_error)
+    let status = client
+        .get_unseal_status(pb::GetUnsealStatusRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .map_err(grpc_error)?
+        .into_inner();
+
+    let nonce: [u8; 32] = status
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| "服务端返回的会话 nonce 无效".to_string())?;
+    let session_public: [u8; 32] = status
+        .session_public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| "服务端返回的会话公钥无效".to_string())?;
+
+    let passphrase = Zeroizing::new(passphrase);
+    let submission_session_id = session_id.clone();
+
+    let (holder_id, share_index, ciphertext, signature) = blocking(move || {
+        let identity = HolderIdentity::load_encrypted(Path::new(&identity_path), &passphrase)
+            .map_err(holder_error)?;
+        let (info, share) =
+            ShareVault::open(Path::new(&vault_path), &passphrase).map_err(holder_error)?;
+
+        if info.holder_id != identity.holder_id() {
+            return Err("vault 与身份文件不属于同一个 holder".to_string());
+        }
+        if info.index == 0 {
+            return Err("vault 中的份额索引无效".to_string());
+        }
+
+        let context = signer_share::submission_context(
+            &submission_session_id,
+            &nonce,
+            &session_public,
+            &info.holder_id,
+            info.index,
+        )
+        .map_err(|_| "构建提交上下文失败".to_string())?;
+        let ciphertext =
+            signer_share::encrypt_share_with_context(&session_public, &share, &context)
+                .map_err(|_| "加密份额失败".to_string())?;
+        let signature = identity.sign(&signer_share::submission_signing_input(
+            &context,
+            &ciphertext,
+        ));
+
+        Ok((info.holder_id, info.index, ciphertext, signature.to_vec()))
     })
     .await?;
 
-    let view = submit_share_bytes(
-        &server_url,
-        session_id,
-        info.holder_id,
-        Some(info.index),
-        share.to_vec(),
-    )
-    .await?;
+    client
+        .submit_unseal_share(pb::SubmitUnsealShareRequest {
+            session_id: session_id.clone(),
+            share_holder_id: holder_id,
+            encrypted_share: ciphertext,
+            signature,
+            share_index: u32::from(share_index),
+            nonce: nonce.to_vec(),
+        })
+        .await
+        .map_err(grpc_error)?;
 
-    Ok(view)
+    let status = client
+        .get_unseal_status(pb::GetUnsealStatusRequest { session_id })
+        .await
+        .map_err(grpc_error)?
+        .into_inner();
+
+    Ok(SessionView::from_status(status))
 }

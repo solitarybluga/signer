@@ -180,10 +180,12 @@ message StartUnsealRequest {}
 message StartUnsealResponse {
   string session_id = 1;
 
-  // Session nonce; share submissions must be bound to it to prevent replay.
+  // Session nonce; share submissions must echo it and bind it into the
+  // submission context to prevent replay.
   bytes nonce = 2;
 
-  // Reserved for share envelope encryption. Empty in v0.1.
+  // Ephemeral X25519 public key for this session. Holders encrypt their share
+  // to this key before submitting. The matching secret never leaves the server.
   bytes session_public_key = 3;
 
   // Number of shares required.
@@ -202,17 +204,23 @@ message SubmitUnsealShareRequest {
   // key and share index.
   string share_holder_id = 2;
 
-  // Raw Shamir share bytes. v0.1 does not add envelope encryption here;
-  // deploy behind mTLS and treat share encryption as a follow-up.
-  // The first byte is the share index.
-  bytes share = 3;
+  // Share encrypted to the session public key with the v2 share envelope.
+  // The envelope is bound to the submission context (session, nonce, session
+  // public key, holder id, share index); the plaintext share is never sent.
+  bytes encrypted_share = 3;
 
-  // Reserved for holder signatures; must be empty in v0.1.
+  // Ed25519 signature over signer.unseal.submit.sig.v2 || SHA-256(context) ||
+  // SHA-256(encrypted_share), made with the holder identity key registered in
+  // kek_check.json. Required.
   bytes signature = 4;
 
-  // Share index. When 0, the server falls back to the first byte of `share`.
-  // New clients should send the value stored in their vault.
+  // Share index from the holder's vault. Required; must match the registered
+  // index for this holder and the first byte of the decrypted share.
   uint32 share_index = 5;
+
+  // Session nonce returned by StartUnseal or GetUnsealStatus. Must match the
+  // server's current nonce; a stale or missing nonce is rejected.
+  bytes nonce = 6;
 }
 
 message SubmitUnsealShareResponse {
@@ -231,6 +239,12 @@ message GetUnsealStatusResponse {
   int32 shares_collected = 3;
   UnsealState state = 4;
   google.protobuf.Timestamp expires_at = 5;
+
+  // Session nonce; holders must echo it in their submission.
+  bytes nonce = 6;
+
+  // Ephemeral X25519 public key holders encrypt their share to.
+  bytes session_public_key = 7;
 }
 
 message SealRequest {}

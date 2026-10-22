@@ -27,7 +27,7 @@ v0.1 的 KEK 使用 Shamir 秘密分享拆分给多个持有者。当前实现�
 
 ### 非目标
 
-- 不实现持有者签名、提交 nonce 绑定或 gRPC 传输加密；这些是独立的安全工作。
+- 本 VSS 方案本身不实现持有者签名、提交 nonce 绑定或 gRPC 传输加密；这些已在后续 unseal-security 改动中补齐（见 [unseal-protocol.md](unseal-protocol.md)）。
 - 不解决持有者拒绝提交、离线或丢失份额导致的可用性问题。
 - 不改变 `t-of-n` 的阈值语义。
 - 不处理 v0.3 的 FROST / CGGMP21 门限签名；本方案只针对 v0.1 的 KEK 份额。
@@ -123,13 +123,13 @@ index u8 | y [32]        // y = f(index) mod l, little-endian
 
 与当前 `sharks` 份额长度相同，但数学含义不同。因此所有相关文件必须带 scheme 版本，禁止把旧份额解释成 VSS 份额。
 
-### 5.2 `kek_check.json` v2
+### 5.2 `kek_check.json` v3
 
-在现有字段上增加版本和承诺：
+在原有字段上增加版本、承诺和持有者注册表（v3 在每个 holder 上增加 Ed25519 公钥）：
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "threshold": 3,
   "total_shares": 5,
   "nonce": "<hex 24B>",
@@ -139,9 +139,9 @@ index u8 | y [32]        // y = f(index) mod l, little-endian
     "commitments": ["<hex 32B>", "<hex 32B>", "<hex 32B>"]
   },
   "holders": [
-    { "id": "alice", "index": 1 },
-    { "id": "bob", "index": 2 },
-    { "id": "carol", "index": 3 }
+    { "id": "alice", "index": 1, "ed25519_public": "<hex 32B>" },
+    { "id": "bob", "index": 2, "ed25519_public": "<hex 32B>" },
+    { "id": "carol", "index": 3, "ed25519_public": "<hex 32B>" }
   ]
 }
 ```
@@ -149,7 +149,7 @@ index u8 | y [32]        // y = f(index) mod l, little-endian
 说明：
 
 - `commitments.len() == threshold`。
-- `holders` 用于服务端绑定 holder ID 与 share index；当前服务端没有这张表，VSS 校验必须与服务端索引绑定一起上线，否则一个有效份额仍可能被换到别的 holder 名下提交。
+- `holders` 用于服务端绑定 holder ID、share index 和提交签名公钥；缺少 Ed25519 公钥的旧持有者无法通过安全解封。
 - `kek_check.json` 是本地可信配置，没有 operator 签名；长期可以让服务端加载并验证签名的 manifest。
 
 ### 5.3 manifest v2
@@ -204,7 +204,7 @@ vss_verified u8           // 1 = 已通过 VSS 校验
 5. 计算 `C_0..C_{t-1}`。
 6. 用 `s.to_bytes()` 生成 KEK check。
 7. 用现有信封格式把份额加密给各持有者。
-8. 写 `kek_check.json` v2、`manifest.json` v2 和签名。
+8. 写 `kek_check.json` v3、`manifest.json` v2 和签名。
 9. zeroize `s`、系数和份额明文。
 
 ### 6.2 持有者导入
@@ -238,8 +238,8 @@ vss_verified u8           // 1 = 已通过 VSS 校验
 
 ### 6.4 与现有 proto 的关系
 
-- 份额仍是 33 字节，可继续放在 `SubmitUnsealShareRequest.share` 中。
-- 建议新增显式的 `share_index` 字段，避免只依赖首字节；同时为后续持有者签名留出绑定字段。
+- 份额仍为 33 字节，但不再以明文传输：`SubmitUnsealShareRequest.encrypted_share` 携带绑定会话上下文的 v2 信封密文。
+- `share_index`、`nonce` 和 Ed25519 `signature` 为必填字段，服务端验签、解密后才做 VSS 校验。
 - VSS 失败映射为 `INVALID_ARGUMENT`，不与“重建失败”共用错误语义。
 - 会话状态仍由现有 `UnsealState` 表达；不需要新增状态，但需要区分“单份被拒绝”和“整个会话失败”的日志/审计。
 
@@ -248,13 +248,13 @@ vss_verified u8           // 1 = 已通过 VSS 校验
 | 组件 | 改动 |
 |---|---|
 | `crates/vss`（`signer-vss`，新增） | polynomial、commitments、份额验证、拉格朗日恢复、测试 |
-| `crates/core/src/unseal.rs` | `KekCheckFile` v2；会话保存已验证份额；提交时 VSS 校验；恢复改用新方案 |
+| `crates/core/src/unseal.rs` | `KekCheckFile` v3；会话保存已验证份额；提交时验签、解密、VSS 校验；恢复改用新方案 |
 | `crates/vss/Cargo.toml` | 依赖 `curve25519-dalek`；`signer-core` 移除 `sharks` |
 | `crates/admin/src/main.rs` | 生成 KEK Scalar、系数、承诺；写 v2 文件和 manifest |
 | `crates/holder/src/manifest.rs` | `VssCommitments` 类型、校验；manifest v2 |
 | `crates/holder/src/lib.rs` | 导入时验证 VSS |
 | `crates/holder/src/vault.rs` | vault v2 header、`vss_verified` |
-| `crates/server/src/main.rs` | 读取 `KekCheckFile` v2 和 commitments |
+| `crates/server/src/main.rs` | 读取 `KekCheckFile` v3、commitments 和 holder Ed25519 公钥 |
 | `crates/server/src/grpc.rs` | 传递 VSS 错误；可选 `share_index` |
 | `proto/signer/v1/signer.proto` | 新增 `share_index`（建议）；错误码说明 |
 | `desktop/` | 显示 VSS 验证状态；legacy 导入显示未 VSS |
@@ -300,7 +300,7 @@ v0.1 尚未发布，已直接切换到 v2：
 
 ### 残余风险
 
-- **不认证提交者**：VSS 只证明份额有效，不证明提交者就是该 holder。仍需持有者签名 + session nonce 绑定。
+- **提交者认证已由后续改动补齐**：VSS 本身只证明份额有效；现在由 Holder Ed25519 签名 + session nonce 绑定 + 每会话 X25519 加密完成提交认证，服务端验签/解密后才做 VSS 校验。
 - **可用性**：持有者可以拒绝提交；恶意 dealer 可以中止仪式。
 - **承诺公开**：`C_0 = sG` 公开 KEK 的群元素；在离散对数假设下不泄露 `s`，但 Feldman VSS 不是信息论隐藏的。如果需要更强的隐藏性，应使用 Pedersen VSS，代价是额外的生成元和承诺。
 - **主机被攻破**：解封状态下内存中的 KEK/私钥不在 VSS 保护范围内。
@@ -322,7 +322,7 @@ v0.1 尚未发布，已直接切换到 v2：
 
 ### 集成测试
 
-1. `signer-admin init` 生成 v2 manifests、kek_check 和份额。
+1. `signer-admin init` 生成 manifest v2、`kek_check.json` v3 和份额。
 2. 桌面端导入：正确份额通过 VSS；篡改份额/承诺被拒绝。
 3. 服务端提交：无效份额被拒，会话仍为 `Collecting`；其他持有者继续提交后成功解封。
 4. 达到阈值后重建的 KEK 通过 `C_0` 和 KEK check。
@@ -351,8 +351,8 @@ v0.1 尚未发布，已直接切换到 v2：
 ## 12. 实现决策
 
 - 使用基于 `curve25519-dalek` 4.1.3 的自研 Feldman VSS，不引入 `vsss-rs`。
-- 采用 clean break：`KekCheckFile` v2、manifest v2、vault v2；旧 v1 文件拒绝加载，需要重新 `init` 和分发。
-- 服务端从 `kek_check.json` v2 读取 commitments 和 holder/index 注册表；manifest 继续作为持有者侧验签与 VSS 校验的输入。
-- `SubmitUnsealShareRequest` 新增 `share_index` 字段；为 0 时兼容旧客户端，回退到份额首字节。
+- 采用 clean break：`KekCheckFile` v3、manifest v2、vault v2；旧文件拒绝加载，需要重新 `init` 和分发。
+- 服务端从 `kek_check.json` v3 读取 commitments、holder/index 和 Ed25519 公钥；manifest 继续作为持有者侧验签与 VSS 校验的输入。
+- `SubmitUnsealShareRequest` 的 `share_index` 为必填；提交字段为 `encrypted_share` + `nonce` + Ed25519 `signature`，服务端验签、解密后才做 VSS 校验。
 - 选择 Feldman 而不是 Pedersen：VSS 只用于一致性和完整性，`C_0` 泄露在离散对数假设下可接受。
-- `docs/threat-model.md` 的 T3 已更新为部分缓解；持有者签名、session nonce 绑定和份额传输加密仍待补。
+- `docs/threat-model.md` 的 T3 已更新；传输层 TLS/服务端认证仍是遗留项（T12）。
