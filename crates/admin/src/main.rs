@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
-use signer_core::unseal::{KekCheckFile, UnsealConfig, UnsealManager};
+use signer_core::unseal::{HolderIndex, KekCheckFile, UnsealConfig, UnsealManager};
 use signer_holder::{
     HolderEntry, Manifest, PublicBundle, generate_operator_key, operator_fingerprint,
     operator_public, sha256_hex, sign_manifest, validate_holder_id, write_atomic,
@@ -276,9 +276,24 @@ fn init(
         }
     }
 
+    let unseal_holders: Vec<HolderIndex> = registered
+        .iter()
+        .enumerate()
+        .map(|(index, holder)| HolderIndex {
+            id: holder.id.clone(),
+            index: (index + 1) as u8,
+        })
+        .collect();
+
     let config = UnsealConfig::new(threshold, total_shares);
-    let (manager, shares) = UnsealManager::bootstrap(config)?;
-    let check_file = KekCheckFile::from_check(&manager.check(), threshold, total_shares);
+    let (manager, shares, vss) = UnsealManager::bootstrap(config, unseal_holders.clone())?;
+    let check_file = KekCheckFile::from_check(
+        &manager.check(),
+        threshold,
+        total_shares,
+        vss.clone(),
+        unseal_holders,
+    );
 
     fs::create_dir_all(data_dir)?;
     fs::write(&check_path, serde_json::to_vec_pretty(&check_file)?)?;
@@ -318,10 +333,11 @@ fn init(
         let key_bytes = Zeroizing::new(key_bytes);
 
         let manifest = Manifest {
-            version: 1,
+            version: 2,
             ceremony_id,
             threshold,
             total_shares,
+            vss: Some(vss),
             holders: manifest_holders,
         };
         let manifest_bytes = manifest.encode()?;

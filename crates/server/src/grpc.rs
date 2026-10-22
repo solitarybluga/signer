@@ -101,9 +101,23 @@ impl SignerService for SignerGrpc {
             return Err(Status::invalid_argument("share is required"));
         }
 
+        let share_index =
+            if request.share_index == 0 {
+                None
+            } else {
+                Some(u8::try_from(request.share_index).map_err(|_| {
+                    Status::invalid_argument("share_index must be between 1 and 255")
+                })?)
+            };
+
         let session_id = parse_session_id(&request.session_id)?;
         self.unseal
-            .submit_share(session_id, &request.share_holder_id, &request.share)
+            .submit_share(
+                session_id,
+                &request.share_holder_id,
+                share_index,
+                &request.share,
+            )
             .map_err(map_unseal_error)?;
 
         let status = self.unseal.status(session_id).map_err(map_unseal_error)?;
@@ -167,11 +181,23 @@ fn map_unseal_error(error: UnsealError) -> Status {
         UnsealError::SessionClosed => {
             Status::failed_precondition("unseal session is no longer collecting")
         }
+        UnsealError::UnknownHolder(holder) => {
+            Status::permission_denied(format!("share holder is not registered: {holder}"))
+        }
         UnsealError::DuplicateHolder(holder) => {
             Status::already_exists(format!("duplicate share holder: {holder}"))
         }
+        UnsealError::DuplicateIndex(index) => {
+            Status::already_exists(format!("duplicate share index: {index}"))
+        }
+        UnsealError::IndexMismatch => {
+            Status::invalid_argument("share index does not match the holder registration")
+        }
         UnsealError::InvalidShare(message) => {
             Status::invalid_argument(format!("invalid share: {message}"))
+        }
+        UnsealError::VssRejected(message) => {
+            Status::invalid_argument(format!("share failed VSS verification: {message}"))
         }
         UnsealError::RecoveryFailed(message) => {
             Status::invalid_argument(format!("failed to recover the KEK: {message}"))
@@ -184,11 +210,21 @@ fn map_unseal_error(error: UnsealError) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use signer_core::unseal::{UnsealConfig, UnsealManager};
+    use signer_core::unseal::{HolderIndex, UnsealConfig, UnsealManager};
+
+    fn holders() -> Vec<HolderIndex> {
+        (1..=3)
+            .map(|index| HolderIndex {
+                id: format!("holder-{index}"),
+                index,
+            })
+            .collect()
+    }
 
     #[tokio::test]
     async fn unseal_rpcs_work_end_to_end() {
-        let (manager, shares) = UnsealManager::bootstrap(UnsealConfig::new(2, 3)).unwrap();
+        let (manager, shares, _) =
+            UnsealManager::bootstrap(UnsealConfig::new(2, 3), holders()).unwrap();
         let service = SignerGrpc::new(Arc::new(manager));
 
         let start = service
@@ -203,8 +239,9 @@ mod tests {
             .submit_unseal_share(Request::new(SubmitUnsealShareRequest {
                 session_id: start.session_id.clone(),
                 share_holder_id: "holder-1".to_string(),
-                share: shares[0].clone(),
+                share: shares[0].to_vec(),
                 signature: Vec::new(),
+                share_index: 1,
             }))
             .await
             .unwrap()
@@ -216,8 +253,9 @@ mod tests {
             .submit_unseal_share(Request::new(SubmitUnsealShareRequest {
                 session_id: start.session_id.clone(),
                 share_holder_id: "holder-2".to_string(),
-                share: shares[1].clone(),
+                share: shares[1].to_vec(),
                 signature: Vec::new(),
+                share_index: 2,
             }))
             .await
             .unwrap()
@@ -244,7 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn unwired_rpcs_report_unimplemented() {
-        let (manager, _) = UnsealManager::bootstrap(UnsealConfig::new(2, 3)).unwrap();
+        let (manager, _, _) = UnsealManager::bootstrap(UnsealConfig::new(2, 3), holders()).unwrap();
         let service = SignerGrpc::new(Arc::new(manager));
 
         let error = service
@@ -257,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_session_id_is_rejected() {
-        let (manager, _) = UnsealManager::bootstrap(UnsealConfig::new(2, 3)).unwrap();
+        let (manager, _, _) = UnsealManager::bootstrap(UnsealConfig::new(2, 3), holders()).unwrap();
         let service = SignerGrpc::new(Arc::new(manager));
 
         let error = service

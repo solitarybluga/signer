@@ -6,7 +6,7 @@
 
 ## 项目定位
 
-`signer` 以密文形式保存私钥，启动时必须由预设数量的份额持有者共同提供 Shamir 份额，恢复出密钥加密密钥（KEK）后才能解密私钥并提供签名服务。目标是支持 secp256k1 + ECDSA（EVM）与 edwards25519 + EdDSA（Solana）。
+`signer` 以密文形式保存私钥，启动时必须由预设数量的份额持有者共同提供 Shamir 份额，恢复出密钥加密密钥（KEK）后才能解密私钥并提供签名服务。当前解封使用 Ristretto255 Feldman VSS，持有者和服务端都能逐份验证份额。目标是支持 secp256k1 + ECDSA（EVM）与 edwards25519 + EdDSA（Solana）。
 
 ## 它不是什么（v0.1）
 
@@ -16,7 +16,7 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 
 | 里程碑 | 范围 | 状态 |
 | --- | --- | --- |
-| v0.1 | 单签 + Shamir 门限解封 | 🚧 进行中（存储层已实现） |
+| v0.1 | 单签 + VSS 门限解封 | 🚧 进行中（VSS 解封已实现） |
 | v0.2 | 份额轮换、mTLS、监控指标 | ☐ 计划中 |
 | v0.3 | 门限签名（FROST / CGGMP21） | ☐ 计划中 |
 
@@ -26,21 +26,22 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 | --- | --- |
 | 存储模型、迁移、SQLite / PostgreSQL 实现 | ✅ 已实现，含测试 |
 | KEK 初始化与加密份额分发（signer-admin） | ✅ 已实现 |
-| 门限解封（Shamir 会话、KEK 恢复与校验） | ✅ 核心已实现 |
+| 门限解封（Ristretto255 Feldman VSS、会话、KEK 恢复与校验） | ✅ 核心已实现 |
+| VSS 份额校验（Holder 导入 + Server 提交） | ✅ 已实现 |
 | gRPC 解封接口（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal） | ✅ 已实现 |
 | 桌面端 Holder 身份、份额 vault 与解封提交（Tauri） | ✅ 已实现 |
-| 加密 keystore（DEK/KEK、Shamir 分享） | 🚧 开发中 |
-| 份额传输加密、持有者签名、VSS | 🚧 计划中 |
+| 加密 keystore（DEK/KEK、VSS 分享） | 🚧 开发中 |
+| 份额传输加密、持有者签名 | 🚧 计划中 |
 | 密钥管理接口与签名（ECDSA / EdDSA） | 🚧 未开始 |
 
 ## v0.1 目标特性
 
-以下为 v0.1 目标；当前仅存储层完成实现，其余仍在开发中。
+以下为 v0.1 目标；存储、解封、份额分发和桌面端 Holder 流程已完成，keystore 与签名仍在开发中。
 
 - 加密存储：每密钥独立 DEK，KEK 信封包裹（XChaCha20-Poly1305）
 - 支持导入已有私钥（secp256k1 标量 / edwards25519 种子）
-- 份额分发：对 Shamir 份额做 X25519 信封加密，每个持有者用本地私钥解密
-- 门限解封：对密钥加密密钥做 Shamir 秘密分享，解封时用 KEK 校验密文验证重建结果（VSS 待补）
+- 份额分发：对 VSS 份额做 X25519 信封加密，每个持有者用本地私钥解密
+- 门限解封：对 KEK 做 Ristretto255 Feldman VSS 分享，逐份校验份额，并用 KEK 校验密文验证重建结果
 - 签名：secp256k1 + ECDSA（EVM）与 edwards25519 + EdDSA（Solana）
 - gRPC 解封接口（tonic）：StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal
 - 所有密钥操作写入审计日志
@@ -78,7 +79,7 @@ cargo run -p signer-admin -- holder-keygen --out holder-1.key
 # 3. 生成 operator 签名密钥（可选；桌面端验证 manifest 时需要）
 cargo run -p signer-admin -- operator-keygen --out operator.key --pub-out operator.pub
 
-# 4. 生成 KEK、Shamir 分片并加密导出 share 文件
+# 4. 生成 KEK、VSS 分片并加密导出 share 文件
 cargo run -p signer-admin -- init --holders holders.json --operator-key operator.key
 
 # 5. 启动服务
@@ -86,6 +87,8 @@ cargo run -p signer-server
 ```
 
 `holders.json` 既接受旧格式 `{"id": "...", "public_key": "<x25519 hex>"}`，也接受桌面端导出的 holder public bundle（`holder_id`、`x25519_public`、`ed25519_public`、`self_signature`）。提供 `--operator-key` 时，`init` 还会写出 `manifest.json`、`manifest.sig` 和 `operator.pub`，桌面端可据此验证份额来源。
+
+VSS 解封使用 `kek_check.json` v2、manifest v2 和 vault v2；旧 v1 文件和旧份额不兼容，需要重新执行 `init` 并重新分发。
 
 服务端不再自动生成 KEK；缺少 `data/kek_check.json` 会报错并提示先执行 `signer-admin init`。生成的 `data/shares/*.share` 必须交给对应持有者，`data/` 不能提交到仓库。
 
@@ -108,6 +111,7 @@ cargo run
 | --- | --- |
 | `crates/proto` | `signer.v1` proto 与生成的 Rust 代码 |
 | `crates/core` | 存储层与门限解封核心 |
+| `crates/vss` | Ristretto255 Feldman VSS：份额生成、验证与恢复 |
 | `crates/holder` | Holder 身份、manifest 验签、share vault 与份额导入 |
 | `crates/share` | X25519 份额信封加密 |
 | `crates/admin` | KEK 初始化与份额分发工具 |
@@ -146,6 +150,8 @@ gRPC 定义见 [`proto/signer/v1/signer.proto`](proto/signer/v1/signer.proto)。
 | [docs/threat-model.md](docs/threat-model.md) | 资产、信任边界、非目标 |
 | [docs/key-lifecycle.md](docs/key-lifecycle.md) | 密钥创建、轮换、备份、销毁 |
 | [docs/unseal-protocol.md](docs/unseal-protocol.md) | 门限解封协议 |
+| [docs/vss-unseal.md](docs/vss-unseal.md) | VSS 增强解封方案与实现说明 |
+| [docs/adr/0007-vss-feldman-ristretto255.md](docs/adr/0007-vss-feldman-ristretto255.md) | ADR-0007：Ristretto255 Feldman VSS |
 | [docs/storage.md](docs/storage.md) | 存储 trait、表结构、HA |
 | [docs/operations.md](docs/operations.md) | 配置、可观测性、运维手册 |
 | [desktop/README.md](desktop/README.md) | Tauri 桌面客户端 |

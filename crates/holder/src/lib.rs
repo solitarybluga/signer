@@ -40,6 +40,7 @@ pub struct ImportedShare {
     pub ceremony_id: Option<String>,
     pub manifest_hash: Option<[u8; 32]>,
     pub operator_fingerprint: Option<String>,
+    pub vss_verified: bool,
 }
 
 impl ImportedShare {
@@ -55,6 +56,7 @@ impl ImportedShare {
             self.ceremony_id.as_deref(),
             self.manifest_hash,
             self.source,
+            self.vss_verified,
         )
     }
 }
@@ -94,6 +96,11 @@ pub fn import_share(
                 return Err(HolderError::IndexMismatch);
             }
 
+            let vss_verified = manifest.vss.is_some();
+            if vss_verified {
+                manifest.verify_share(entry, &share)?;
+            }
+
             Ok(ImportedShare {
                 share,
                 holder_id: identity.holder_id().to_string(),
@@ -102,6 +109,7 @@ pub fn import_share(
                 ceremony_id: Some(manifest.ceremony_id.clone()),
                 manifest_hash: Some(manifest_hash(package.manifest_bytes)),
                 operator_fingerprint: Some(operator_fingerprint(package.operator_public)),
+                vss_verified,
             })
         }
         None => {
@@ -114,6 +122,7 @@ pub fn import_share(
                 ceremony_id: None,
                 manifest_hash: None,
                 operator_fingerprint: None,
+                vss_verified: false,
             })
         }
     }
@@ -148,6 +157,7 @@ mod tests {
             ceremony_id: "ceremony-1".to_string(),
             threshold: 1,
             total_shares: 1,
+            vss: None,
             holders: vec![HolderEntry {
                 id: "alice".to_string(),
                 index: 1,
@@ -171,12 +181,92 @@ mod tests {
         .unwrap();
         assert_eq!(imported.index, 1);
         assert_eq!(imported.source, VaultSource::Manifest);
+        assert!(!imported.vss_verified);
         assert_eq!(imported.ceremony_id.as_deref(), Some("ceremony-1"));
         assert_eq!(imported.manifest_hash, Some(manifest_hash(&bytes)));
         assert_eq!(
             imported.operator_fingerprint,
             Some(operator_fingerprint(&public))
         );
+    }
+
+    #[test]
+    fn imports_vss_verified_share() {
+        let identity = HolderIdentity::generate("alice").unwrap();
+        let secret = signer_vss::generate_secret().unwrap();
+        let (shares, commitments) = signer_vss::split_secret(&secret, 1, 1).unwrap();
+        let envelope = signer_share::encrypt_share(&identity.x25519_public(), &shares[0]).unwrap();
+
+        let (operator_secret, operator_public) = generate_operator_key().unwrap();
+        let manifest = Manifest {
+            version: 2,
+            ceremony_id: "ceremony-vss".to_string(),
+            threshold: 1,
+            total_shares: 1,
+            vss: Some(commitments),
+            holders: vec![HolderEntry {
+                id: "alice".to_string(),
+                index: 1,
+                x25519_public: hex::encode(identity.x25519_public()),
+                ed25519_public: Some(hex::encode(identity.ed25519_public())),
+                envelope_sha256: sha256_hex(&envelope),
+            }],
+        };
+        let bytes = manifest.encode().unwrap();
+        let signature = sign_manifest(&bytes, &operator_secret).unwrap();
+
+        let imported = import_share(
+            &identity,
+            &envelope,
+            Some(ManifestPackage {
+                manifest_bytes: &bytes,
+                signature: &signature,
+                operator_public: &operator_public,
+            }),
+        )
+        .unwrap();
+        assert!(imported.vss_verified);
+        assert_eq!(imported.index, 1);
+        assert_eq!(imported.share.as_slice(), shares[0].as_slice());
+    }
+
+    #[test]
+    fn rejects_vss_inconsistent_share() {
+        let identity = HolderIdentity::generate("alice").unwrap();
+        let secret = signer_vss::generate_secret().unwrap();
+        let (shares, commitments) = signer_vss::split_secret(&secret, 1, 1).unwrap();
+        let mut tampered = shares[0].to_vec();
+        tampered[5] ^= 1;
+        let envelope = signer_share::encrypt_share(&identity.x25519_public(), &tampered).unwrap();
+
+        let (operator_secret, operator_public) = generate_operator_key().unwrap();
+        let manifest = Manifest {
+            version: 2,
+            ceremony_id: "ceremony-vss".to_string(),
+            threshold: 1,
+            total_shares: 1,
+            vss: Some(commitments),
+            holders: vec![HolderEntry {
+                id: "alice".to_string(),
+                index: 1,
+                x25519_public: hex::encode(identity.x25519_public()),
+                ed25519_public: None,
+                envelope_sha256: sha256_hex(&envelope),
+            }],
+        };
+        let bytes = manifest.encode().unwrap();
+        let signature = sign_manifest(&bytes, &operator_secret).unwrap();
+
+        let result = import_share(
+            &identity,
+            &envelope,
+            Some(ManifestPackage {
+                manifest_bytes: &bytes,
+                signature: &signature,
+                operator_public: &operator_public,
+            }),
+        );
+        assert!(matches!(result, Err(HolderError::VssRejected)));
     }
 
     #[test]
@@ -189,6 +279,7 @@ mod tests {
             ceremony_id: "ceremony-1".to_string(),
             threshold: 1,
             total_shares: 1,
+            vss: None,
             holders: vec![HolderEntry {
                 id: "alice".to_string(),
                 index: 1,

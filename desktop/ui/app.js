@@ -356,16 +356,22 @@ async function importShare() {
     const info = result.vault;
     const verified =
       info.source === "manifest" ? "operator manifest 已验证" : "legacy 未验签";
+    const vss = info.vss_verified ? "VSS 已验证" : "未 VSS 验证";
     const ceremony = info.ceremony_id ? ` · ceremony ${info.ceremony_id}` : "";
     const operator = result.operator_fingerprint
       ? ` · operator 指纹 ${result.operator_fingerprint}`
       : "";
     byId("import-result").textContent =
-      `${info.holder_id} · index ${info.index} · ${verified}${ceremony}${operator}`;
+      `${info.holder_id} · index ${info.index} · ${verified} · ${vss}${ceremony}${operator}`;
     byId("submit-vault-path").value = vaultPath;
 
     if (info.source === "manifest") {
       appendLog(`份额已验证并写入 vault：${info.holder_id}（index ${info.index}）`, "ok");
+      if (info.vss_verified) {
+        appendLog("份额已通过 VSS 承诺校验", "ok");
+      } else {
+        appendLog("manifest 未包含 VSS 承诺，份额未通过 VSS 校验", "warning");
+      }
       if (result.operator_fingerprint && !expectedOperatorFingerprint) {
         appendLog(
           `请带外核对 operator 指纹：${result.operator_fingerprint}`,
@@ -375,7 +381,7 @@ async function importShare() {
         appendLog("operator 指纹已与输入值核对一致", "ok");
       }
     } else {
-      appendLog("份额已写入 vault，但这是 legacy 导入：未验证 operator 签名", "warning");
+      appendLog("份额已写入 vault，但这是 legacy 导入：未验证 operator 签名和 VSS", "warning");
     }
   } catch (error) {
     appendLog(String(error), "error");

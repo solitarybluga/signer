@@ -204,10 +204,15 @@ message SubmitUnsealShareRequest {
 
   // Raw Shamir share bytes. v0.1 does not add envelope encryption here;
   // deploy behind mTLS and treat share encryption as a follow-up.
+  // The first byte is the share index.
   bytes share = 3;
 
   // Reserved for holder signatures; must be empty in v0.1.
   bytes signature = 4;
+
+  // Share index. When 0, the server falls back to the first byte of `share`.
+  // New clients should send the value stored in their vault.
+  uint32 share_index = 5;
 }
 
 message SubmitUnsealShareResponse {

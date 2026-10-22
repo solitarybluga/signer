@@ -13,8 +13,8 @@ Tauri 2 桌面客户端，覆盖操作员和份额持有者的完整解封流程
 - 生成身份：Ed25519 签名密钥 + X25519 加密密钥
 - 导出公开信息（`holder.pub.json`），交给 operator 注册
 - 导入 `signer-admin init` 生成的 `.share`
-- 可选验证 operator 签名的 manifests（`manifest.json` + `manifest.sig` + `operator.pub`）
-- 解密并校验份额后，加密保存为本地 share vault
+- 验证 operator 签名的 manifest（`manifest.json` + `manifest.sig` + `operator.pub`）
+- 用 manifest 中的 VSS 承诺校验份额，解密后加密保存为本地 share vault
 
 **份额持有者 — Unseal**
 
@@ -55,10 +55,10 @@ cargo run -p signer-admin -- init \
 ```
 
 4. 把每个 holder 的 `.share`、`manifest.json`、`manifest.sig`、`operator.pub` 交给对应 holder；通过**另一个渠道**公布 operator 公钥指纹。
-5. Holder 在桌面端「导入份额」中验证并保存到 vault。可在「operator 指纹」中填入带外核对值；提供时会强制比对，不提供时 UI 会显示实际指纹并提示带外核对。建议把 `manifest.json`、`manifest.sig`、`operator.pub` 与 vault 一起归档，便于后续审计。
+5. Holder 在桌面端「导入份额」中验证 manifest、VSS 承诺并保存到 vault。可在「operator 指纹」中填入带外核对值；提供时会强制比对，不提供时 UI 会显示实际指纹并提示带外核对。建议把 `manifest.json`、`manifest.sig`、`operator.pub` 与 vault 一起归档，便于后续审计。
 6. 解封时，Holder 在「提交份额」中粘贴 Session ID，选择 vault、输入口令并提交。
 
-未提供 manifest 三项时，客户端按 legacy 方式导入：只校验信封和份额索引，**不验证 operator 签名**。UI 会显示警告。
+未提供 manifest 三项时，客户端按 legacy 方式导入：只校验信封和份额索引，**不验证 operator 签名，也不做 VSS 校验**。UI 会显示警告。
 
 ## 安全说明
 

@@ -29,14 +29,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let raw = std::fs::read(&check_path)?;
     let file: KekCheckFile = serde_json::from_slice(&raw)?;
-    let (check, threshold, total_shares) = file.into_parts()?;
+    let (check, threshold, total_shares, vss, holders) = file.into_parts()?;
 
     let config = UnsealConfig {
         threshold,
         total_shares,
         session_ttl: session_ttl()?,
     };
-    let manager = UnsealManager::from_check(config, check)?;
+    let manager = UnsealManager::from_check(config, check, vss, holders)?;
 
     let addr: SocketAddr = std::env::var("SIGNER_GRPC_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:50051".to_string())

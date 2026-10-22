@@ -52,6 +52,9 @@ pub enum HolderError {
     #[error("share index does not match")]
     IndexMismatch,
 
+    #[error("share failed VSS verification")]
+    VssRejected,
+
     #[error("invalid KDF parameters")]
     InvalidKdfParams,
 

@@ -10,12 +10,13 @@ use zeroize::Zeroizing;
 
 use crate::error::HolderError;
 use crate::file::{
-    Cursor, FORMAT_VERSION, KdfParams, MAX_CEREMONY_ID_LEN, MAX_HOLDER_ID_LEN, NONCE_LEN, SALT_LEN,
-    SHARE_LEN, VAULT_MAGIC, derive_key, random_array, read_file, validate_ceremony_id,
-    validate_holder_id, write_atomic,
+    Cursor, KdfParams, MAX_CEREMONY_ID_LEN, MAX_HOLDER_ID_LEN, NONCE_LEN, SALT_LEN, SHARE_LEN,
+    VAULT_MAGIC, derive_key, random_array, read_file, validate_ceremony_id, validate_holder_id,
+    write_atomic,
 };
 
-const MIN_FILE_LEN: usize = 4 + 1 + 12 + SALT_LEN + NONCE_LEN + 1 + 1 + 1 + 1 + 32 + 8 + 16;
+const VAULT_VERSION: u8 = 2;
+const MIN_FILE_LEN: usize = 4 + 1 + 12 + SALT_LEN + NONCE_LEN + 1 + 1 + 1 + 1 + 1 + 32 + 8 + 16;
 const MANIFEST_HASH_LEN: usize = 32;
 
 /// How the share in a vault was obtained.
@@ -54,6 +55,8 @@ pub struct VaultInfo {
     pub ceremony_id: Option<String>,
     pub manifest_hash: Option<String>,
     pub created_at: u64,
+    pub vss_verified: bool,
+    pub vss_scheme: Option<String>,
 }
 
 /// Sealed share vault.
@@ -71,6 +74,7 @@ impl ShareVault {
         ceremony_id: Option<&str>,
         manifest_hash: Option<[u8; MANIFEST_HASH_LEN]>,
         source: VaultSource,
+        vss_verified: bool,
     ) -> Result<VaultInfo, HolderError> {
         validate_holder_id(holder_id)?;
         if index == 0 {
@@ -81,6 +85,9 @@ impl ShareVault {
         }
         if share[0] != index {
             return Err(HolderError::IndexMismatch);
+        }
+        if vss_verified && source != VaultSource::Manifest {
+            return Err(HolderError::InvalidVault);
         }
 
         match (source, ceremony_id, manifest_hash) {
@@ -99,6 +106,15 @@ impl ShareVault {
             return Err(HolderError::InvalidVault);
         }
 
+        let vss_scheme = if vss_verified {
+            signer_vss::SCHEME.as_bytes()
+        } else {
+            &[]
+        };
+        if vss_scheme.len() > u8::MAX as usize {
+            return Err(HolderError::InvalidVault);
+        }
+
         let params = KdfParams::default();
         let salt = random_array::<SALT_LEN>();
         let nonce = random_array::<NONCE_LEN>();
@@ -110,10 +126,13 @@ impl ShareVault {
 
         let mut header = Vec::with_capacity(MIN_FILE_LEN);
         header.extend_from_slice(&VAULT_MAGIC);
-        header.push(FORMAT_VERSION);
+        header.push(VAULT_VERSION);
         params.write_to(&mut header);
         header.extend_from_slice(&salt);
         header.extend_from_slice(&nonce);
+        header.push(u8::from(vss_verified));
+        header.push(vss_scheme.len() as u8);
+        header.extend_from_slice(vss_scheme);
         header.push(source.as_u8());
         header.push(index);
         header.push(ceremony_id.len() as u8);
@@ -147,6 +166,12 @@ impl ShareVault {
             ceremony_id,
             manifest_hash,
             created_at,
+            vss_verified,
+            if vss_verified {
+                Some(signer_vss::SCHEME)
+            } else {
+                None
+            },
         ))
     }
 
@@ -205,7 +230,7 @@ fn parse_header(data: &[u8]) -> Result<ParsedHeader, HolderError> {
         return Err(HolderError::InvalidVault);
     }
     let version = cursor.u8().map_err(|_| HolderError::InvalidVault)?;
-    if version != FORMAT_VERSION {
+    if version != VAULT_VERSION {
         return Err(HolderError::InvalidVault);
     }
 
@@ -226,6 +251,27 @@ fn parse_header(data: &[u8]) -> Result<ParsedHeader, HolderError> {
         .map_err(|_| HolderError::InvalidVault)?
         .try_into()
         .map_err(|_| HolderError::InvalidVault)?;
+
+    let vss_verified = match cursor.u8().map_err(|_| HolderError::InvalidVault)? {
+        0 => false,
+        1 => true,
+        _ => return Err(HolderError::InvalidVault),
+    };
+    let scheme_len = cursor.u8().map_err(|_| HolderError::InvalidVault)? as usize;
+    let scheme = String::from_utf8(
+        cursor
+            .take(scheme_len)
+            .map_err(|_| HolderError::InvalidVault)?
+            .to_vec(),
+    )
+    .map_err(|_| HolderError::InvalidVault)?;
+    if vss_verified {
+        if scheme != signer_vss::SCHEME {
+            return Err(HolderError::InvalidVault);
+        }
+    } else if !scheme.is_empty() {
+        return Err(HolderError::InvalidVault);
+    }
 
     let source = VaultSource::parse(cursor.u8().map_err(|_| HolderError::InvalidVault)?)?;
     let index = cursor.u8().map_err(|_| HolderError::InvalidVault)?;
@@ -291,6 +337,12 @@ fn parse_header(data: &[u8]) -> Result<ParsedHeader, HolderError> {
         ceremony_id.as_deref().unwrap_or(""),
         manifest_hash,
         created_at,
+        vss_verified,
+        if vss_verified {
+            Some(scheme.as_str())
+        } else {
+            None
+        },
     );
 
     Ok(ParsedHeader {
@@ -302,6 +354,7 @@ fn parse_header(data: &[u8]) -> Result<ParsedHeader, HolderError> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn info_from_parts(
     holder_id: String,
     index: u8,
@@ -309,6 +362,8 @@ fn info_from_parts(
     ceremony_id: &str,
     manifest_hash: [u8; MANIFEST_HASH_LEN],
     created_at: u64,
+    vss_verified: bool,
+    vss_scheme: Option<&str>,
 ) -> VaultInfo {
     VaultInfo {
         holder_id,
@@ -325,6 +380,8 @@ fn info_from_parts(
             Some(hex::encode(manifest_hash))
         },
         created_at,
+        vss_verified,
+        vss_scheme: vss_scheme.map(str::to_string),
     }
 }
 
@@ -351,9 +408,11 @@ mod tests {
             None,
             None,
             VaultSource::Legacy,
+            false,
         )
         .unwrap();
         assert_eq!(info.source, VaultSource::Legacy);
+        assert!(!info.vss_verified);
         assert_eq!(info.index, 2);
 
         let header_only = ShareVault::info(&path).unwrap();
@@ -379,6 +438,7 @@ mod tests {
             Some("ceremony-1"),
             Some(manifest_hash),
             VaultSource::Manifest,
+            true,
         )
         .unwrap();
 
@@ -386,6 +446,8 @@ mod tests {
         assert_eq!(info.source, VaultSource::Manifest);
         assert_eq!(info.ceremony_id.as_deref(), Some("ceremony-1"));
         assert_eq!(info.manifest_hash, Some(hex::encode(manifest_hash)));
+        assert!(info.vss_verified);
+        assert_eq!(info.vss_scheme.as_deref(), Some(signer_vss::SCHEME));
     }
 
     #[test]
@@ -401,6 +463,7 @@ mod tests {
             None,
             None,
             VaultSource::Legacy,
+            false,
         )
         .unwrap();
 
@@ -430,6 +493,7 @@ mod tests {
                 None,
                 None,
                 VaultSource::Legacy,
+                false,
             ),
             Err(HolderError::IndexMismatch)
         ));

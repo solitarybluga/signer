@@ -105,6 +105,7 @@ fn holder_error(error: HolderError) -> String {
         HolderError::EnvelopeHashMismatch => "份额信封哈希与 manifest 不匹配".to_string(),
         HolderError::InvalidShare => "份额格式无效".to_string(),
         HolderError::IndexMismatch => "份额索引与 manifest 不匹配".to_string(),
+        HolderError::VssRejected => "份额未通过 VSS 验证".to_string(),
         HolderError::InvalidKdfParams => "文件中的 KDF 参数超出允许范围".to_string(),
         HolderError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
             "文件不存在".to_string()
@@ -141,6 +142,7 @@ async fn submit_share_bytes(
     server_url: &str,
     session_id: String,
     holder_id: String,
+    share_index: Option<u8>,
     share: Vec<u8>,
 ) -> Result<SessionView, String> {
     let mut client = connect(server_url).await?;
@@ -151,6 +153,7 @@ async fn submit_share_bytes(
             share_holder_id: holder_id,
             share,
             signature: Vec::new(),
+            share_index: share_index.map(u32::from).unwrap_or(0),
         })
         .await
         .map_err(grpc_error)?;
@@ -219,7 +222,7 @@ pub async fn submit_share(
     let share = signer_share::decrypt_share(&secret, &share_envelope)
         .map_err(|error| format!("failed to decrypt share: {error}"))?;
 
-    submit_share_bytes(&server_url, session_id, holder_id, share.to_vec()).await
+    submit_share_bytes(&server_url, session_id, holder_id, None, share.to_vec()).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -381,7 +384,14 @@ pub async fn holder_submit_from_vault(
     })
     .await?;
 
-    let view = submit_share_bytes(&server_url, session_id, info.holder_id, share.to_vec()).await?;
+    let view = submit_share_bytes(
+        &server_url,
+        session_id,
+        info.holder_id,
+        Some(info.index),
+        share.to_vec(),
+    )
+    .await?;
 
     Ok(view)
 }

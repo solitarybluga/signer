@@ -18,6 +18,11 @@
 - 实现 `PostgresStore` 与 `SqliteStore`，补充存储测试；PostgreSQL 测试通过 testcontainers 自动启动容器。
 - 新增 GitHub Actions CI（fmt、clippy、test）。
 - 实现门限解封核心：Shamir 分片、解封会话、KEK 校验与重新封存。
+- 新增 `signer-vss`：Ristretto255 Feldman VSS 的份额生成、承诺、逐份验证与恢复。
+- 解封核心切换到 VSS：`kek_check.json` v2 保存承诺与 holder/index 注册表；服务端逐份校验后才计数，坏份额不再烧会话。
+- Holder 导入时用 manifest 中的 VSS 承诺校验份额；vault v2 记录 `vss_verified` 和 scheme。
+- `SubmitUnsealShare` 增加 `share_index` 字段；桌面端从 vault 提交时显式携带索引。
+- 新增 ADR-0007：使用 Ristretto255 Feldman VSS。
 - 将解封接口接入 gRPC（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal），新增服务启动流程与数据目录初始化。
 - 新增 Tauri 桌面解封客户端（`desktop/`）：发起会话、提交份额、进度展示与重新封存。
 - 新增 `signer-admin`：X25519 持有者密钥生成、KEK 初始化、加密份额导出。
@@ -30,16 +35,21 @@
 - `signer-admin` 新增 `operator-keygen`，`init` 支持 `--operator-key` 输出签名的 `manifest.json` / `manifest.sig` / `operator.pub`。
 - `signer-admin init` 的 `holders.json` 兼容桌面端导出的 holder public bundle，并校验 self-signature。
 - 桌面端使用原生文件对话框选择身份、份额和 vault 路径，避免密钥字节经过 JS。
+- 新增 `docs/vss-unseal.md`：VSS 解封方案与实现说明。
+- 新增 `docs/adr/0007-vss-feldman-ristretto255.md`：VSS 方案决策记录。
 
 ### 变更
 
 - 完善 README 进度说明与安全报告渠道。
 - 重构为 Cargo workspace：`signer-proto`、`signer-core`、`signer-server` 与桌面端共享依赖和锁文件。
 - 桌面端界面拆分为「操作员」和「份额持有者」两个 tab；份额持有者内部再分为「密钥分发」和「Unseal」两个子 tab，事件日志常驻底部。
+- 解封数据格式升级到 v2（`kek_check.json`、manifest、vault）；旧 v1 文件与旧份额不兼容，需要重新执行 `init` 并重新分发。
+- `kek_check.json` 的 nonce/ciphertext 改为 hex 字符串，便于人工检查。
 
 ### 安全
 
-- 暂无。
+- VSS 在分发和提交阶段校验份额一致性；服务端拒绝无效份额并保持会话 `Collecting`。
+- 仍未实现持有者签名、session nonce 绑定和 gRPC 份额传输加密。
 
 ## [0.1.0] — YYYY-MM-DD
 

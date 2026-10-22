@@ -1,6 +1,8 @@
 # 解封协议
 
-> 状态：核心与 gRPC 接口已实现（Shamir 分片、会话收集、KEK 校验、重新封存）；份额离线分发已使用 X25519 信封加密；gRPC 传输仍为解密后的原始份额，持有者签名与 VSS 校验待接入。
+> 状态：核心与 gRPC 接口已实现（Ristretto255 Feldman VSS 分片与逐份校验、会话收集、KEK 校验、重新封存）；份额离线分发已使用 X25519 信封加密；gRPC 传输仍为解密后的原始份额，持有者签名与传输加密待接入。
+>
+> VSS 实现说明见 [vss-unseal.md](vss-unseal.md)，决策见 [ADR-0007](adr/0007-vss-feldman-ristretto255.md)。
 
 ## 概述
 

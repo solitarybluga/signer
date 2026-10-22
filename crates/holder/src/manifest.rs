@@ -4,11 +4,12 @@ use std::collections::HashSet;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use signer_vss::VssCommitments;
 
 use zeroize::Zeroize;
 
 use crate::error::HolderError;
-use crate::file::{FORMAT_VERSION, random_array, sha256, validate_ceremony_id, validate_holder_id};
+use crate::file::{random_array, sha256, validate_ceremony_id, validate_holder_id};
 
 /// One holder entry in a ceremony manifest.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,6 +29,8 @@ pub struct Manifest {
     pub ceremony_id: String,
     pub threshold: u8,
     pub total_shares: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vss: Option<VssCommitments>,
     pub holders: Vec<HolderEntry>,
 }
 
@@ -38,9 +41,9 @@ impl Manifest {
         Ok(serde_json::to_vec_pretty(self)?)
     }
 
-    /// Validate structure and holder key encodings.
+    /// Validate structure, VSS commitments, and holder key encodings.
     pub fn validate(&self) -> Result<(), HolderError> {
-        if self.version != FORMAT_VERSION {
+        if self.version != 1 && self.version != 2 {
             return Err(HolderError::InvalidManifest);
         }
         validate_ceremony_id(&self.ceremony_id).map_err(|_| HolderError::InvalidManifest)?;
@@ -50,6 +53,16 @@ impl Manifest {
         }
         if self.holders.len() != self.total_shares as usize {
             return Err(HolderError::InvalidManifest);
+        }
+
+        match (&self.vss, self.version) {
+            (None, 1) => {}
+            (Some(vss), 2) => {
+                if vss.len() != self.threshold as usize || vss.decode().is_err() {
+                    return Err(HolderError::InvalidManifest);
+                }
+            }
+            _ => return Err(HolderError::InvalidManifest),
         }
 
         let mut ids = HashSet::new();
@@ -116,6 +129,15 @@ impl Manifest {
             return Err(HolderError::EnvelopeHashMismatch);
         }
         Ok(())
+    }
+
+    /// Verify a decrypted share against the signed VSS commitments.
+    pub fn verify_share(&self, entry: &HolderEntry, share: &[u8]) -> Result<(), HolderError> {
+        let vss = self.vss.as_ref().ok_or(HolderError::InvalidManifest)?;
+        if share.first().copied() != Some(entry.index) {
+            return Err(HolderError::IndexMismatch);
+        }
+        signer_vss::verify_share(vss, share).map_err(|_| HolderError::VssRejected)
     }
 }
 
@@ -196,6 +218,7 @@ mod tests {
             ceremony_id: "ceremony-1".to_string(),
             threshold: 2,
             total_shares: 3,
+            vss: None,
             holders: vec![
                 HolderEntry {
                     id: "alice".to_string(),
