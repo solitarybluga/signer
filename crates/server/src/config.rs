@@ -22,6 +22,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub logging: LoggingConfig,
+    pub audit: AuditConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,6 +73,20 @@ impl Default for DatabaseConfig {
             max_lifetime_secs: 1800,
             sqlite_busy_timeout_secs: 5,
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditConfig {
+    /// Write an `audit_log` row for every Sign attempt. Keep enabled outside
+    /// controlled benchmarks; disabling it removes non-repudiation for Sign.
+    pub sign_enabled: bool,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self { sign_enabled: true }
     }
 }
 
@@ -273,7 +288,17 @@ mod tests {
         assert_eq!(config.server.grpc_addr, DEFAULT_GRPC_ADDR);
         assert_eq!(config.server.data_dir, PathBuf::from(DEFAULT_DATA_DIR));
         assert_eq!(config.server.session_ttl_secs, DEFAULT_SESSION_TTL_SECS);
+        assert!(config.audit.sign_enabled);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn sign_audit_can_be_disabled() {
+        let default = Config::default();
+        assert!(default.audit.sign_enabled);
+
+        let config: Config = toml::from_str("[audit]\nsign_enabled = false\n").unwrap();
+        assert!(!config.audit.sign_enabled);
     }
 
     #[test]

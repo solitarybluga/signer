@@ -8,6 +8,7 @@ members = [
     "crates/holder",
     "crates/admin",
     "crates/server",
+    "crates/loadtest",
     "desktop/src-tauri",
 ]
 default-members = [
@@ -18,6 +19,7 @@ default-members = [
     "crates/holder",
     "crates/admin",
     "crates/server",
+    "crates/loadtest",
 ]
 
 [workspace.package]

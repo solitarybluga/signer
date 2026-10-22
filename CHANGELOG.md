@@ -43,6 +43,7 @@
 - 桌面端 Unseal 流程要求身份文件 + vault，提交前在本地加密份额并签名。
 - 新增 Ed25519/secp256k1 keystore：`CreateKey` / `GetPublicKey` / `ListKeys` / `Sign`；每密钥独立 DEK，私钥用 DEK 加密、DEK 用 KEK 包裹，AAD 绑定 key_id/curve/algorithm/public_key。
 - 新增 secp256k1 + ECDSA：RFC 6979 确定性 nonce、low-s 规范化、33 字节压缩公钥和 65 字节 `r || s || v` 签名。
+- 新增 `signer-loadtest`：自动解封、创建测试密钥并并发调用 `Sign`，输出 QPS 和 p50/p95/p99/p999 延迟。
 - 服务端接入 SQLite/PostgreSQL 存储：默认 `$data_dir/signer.db`，可通过 `database.url` 或 `SIGNER_DATABASE_URL` 切换 PostgreSQL。
 - 服务端新增 `signer.toml` 配置文件（`signer.example.toml` 示例），支持 `--config` / `SIGNER_CONFIG`；环境变量仍可覆盖文件值。`signer.toml` 已加入 gitignore。
 - 数据库配置新增连接池参数：`max_connections`、`min_connections`、`acquire_timeout_secs`、`idle_timeout_secs`、`max_lifetime_secs` 和 SQLite 专用的 `sqlite_busy_timeout_secs`。
@@ -52,6 +53,8 @@
 - 接入 `tracing` 结构化日志：`[logging]` 支持 `level`、`format`（text/json）和 `location`（源码文件/行号），`RUST_LOG` 可覆盖级别；记录启动、密钥、签名和解封事件，不记录载荷或密钥材料。
 - `CreateKey` 在 v0.1 直接创建为 `ACTIVE`；`ImportKey` 仍返回 `UNIMPLEMENTED`。
 - `CreateKey` / `Sign` 写入 `audit_log`：记录 actor、action、key_id、结果和 curve/algorithm；Sign 额外记录 `request_id` 和 `payload_len`，失败尝试记录 denied/error，不记录载荷内容或密钥材料。CreateKey 的密钥插入与审计在同一事务中提交，审计失败会回滚密钥；Sign 在审计提交成功后才返回签名。
+- 新增 `[audit].sign_enabled` 配置项（默认 `true`），允许受控压测时关闭 Sign 审计；关闭时启动日志会给出警告，CreateKey 审计不受影响。
+- keystore 增加内存缓存，缓存只包含加密后的 `KeyRecord`（密文、nonce、wrapped DEK），Sign 命中后不再查询数据库；容量上限 1024。
 
 ### 变更
 

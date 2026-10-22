@@ -4474,6 +4474,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "signer-loadtest"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "signer-holder",
+ "signer-proto",
+ "signer-share",
+ "tokio",
+ "tonic",
+ "zeroize",
+]
+
+[[package]]
 name = "signer-proto"
 version = "0.1.0"
 dependencies = [

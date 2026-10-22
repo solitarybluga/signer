@@ -3,13 +3,25 @@ ARG RUNTIME_IMAGE=debian:bookworm-slim
 
 FROM ${RUST_IMAGE} AS builder
 
+# Optional crates.io-compatible sparse index mirror for restricted networks,
+# e.g. sparse+https://mirrors.ustc.edu.cn/crates.io-index/
+ARG CARGO_REGISTRY_MIRROR=""
+
 WORKDIR /app
 
 # Copy the whole workspace because Cargo resolves every workspace member.
 # target/, data/, .git/ and local secrets are excluded by .dockerignore.
 COPY . .
 
-RUN cargo build --release --locked -p signer-server
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    if [ -n "$CARGO_REGISTRY_MIRROR" ]; then \
+        printf '[source.crates-io]\nreplace-with = "mirror"\n[source.mirror]\nregistry = "%s"\n' \
+            "$CARGO_REGISTRY_MIRROR" > /usr/local/cargo/config.toml; \
+    fi \
+    && cargo build --release --locked -p signer-server \
+    && cp target/release/signer /usr/local/bin/signer
 
 FROM ${RUNTIME_IMAGE}
 
@@ -21,7 +33,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/signer /usr/local/bin/signer
+COPY --from=builder /usr/local/bin/signer /usr/local/bin/signer
 COPY docker/signer.toml /etc/signer/signer.toml
 
 RUN mkdir -p /var/lib/signer/data \

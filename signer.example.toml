@@ -39,6 +39,11 @@ session_ttl_secs = 600
 # SQLite only; ignored by PostgreSQL.
 # sqlite_busy_timeout_secs = 5
 
+[audit]
+# Write an audit_log row for every Sign attempt, including failures.
+# Keep enabled in production; disabling removes non-repudiation for signatures.
+sign_enabled = true
+
 [logging]
 # Used when RUST_LOG is not set. RUST_LOG overrides this value.
 level = "info"

@@ -97,7 +97,7 @@ VSS 解封使用 `kek_check.json` v3（包含 holder Ed25519 注册表）、mani
 
 服务端默认读取工作目录下的 `signer.toml`；可用 `--config <path>` 或 `SIGNER_CONFIG` 指定其他路径。配置示例见 [`signer.example.toml`](signer.example.toml)，实际 `signer.toml` 已被 gitignore。环境变量 `SIGNER_GRPC_ADDR`、`SIGNER_DATA_DIR`、`SIGNER_SESSION_TTL_SECS`、`SIGNER_DATABASE_URL` 会覆盖配置文件中的对应值。未配置 `database.url` 时，默认使用 `$data_dir/signer.db`（SQLite）；`postgres://...` 则使用 PostgreSQL。连接池参数（`max_connections`、`min_connections`、`acquire_timeout_secs`、`idle_timeout_secs`、`max_lifetime_secs`）也在 `[database]` 中配置。
 
-日志使用 `tracing`，默认 `info` 级别并输出源码文件和行号；可在 `signer.toml` 的 `[logging]` 中设置 `level` / `format` / `location`，或用 `RUST_LOG` 覆盖级别，例如 `RUST_LOG=signer_server=debug,sqlx=warn`。
+日志使用 `tracing`，默认 `info` 级别并输出源码文件和行号；可在 `signer.toml` 的 `[logging]` 中设置 `level` / `format` / `location`，或用 `RUST_LOG` 覆盖级别，例如 `RUST_LOG=signer_server=debug,sqlx=warn`。`[audit].sign_enabled` 控制是否记录每次 Sign 审计，默认 `true`；生产环境不应关闭。
 
 本地 PostgreSQL 可以用仓库根目录的 compose 文件启动：
 
@@ -131,6 +131,20 @@ cargo run
 
 默认连接 `http://127.0.0.1:50051`。界面顶部可在「操作员」和「份额持有者」之间切换；持有者 tab 内再分「密钥分发」和「Unseal」：前者生成身份、导出公开信息、导入并验证 `.share`、把份额加密保存为本地 vault，后者用身份文件 + vault 解锁，把份额加密到会话临时公钥并用 Ed25519 签名后提交。manifest 三项（`manifest.json`、`manifest.sig`、`operator.pub`）可选；不提供时按 legacy 方式导入并显示未验签警告。gRPC 尚无 TLS/服务端认证，仅限本机或可信网络使用。
 
+### 压测
+
+`signer-loadtest` 可以在测试环境自动解封、创建测试密钥并并发调用 `Sign`：
+
+```bash
+SIGNER_LOADTEST_PASSPHRASE='test-passphrase' \
+cargo run -p signer-loadtest -- \
+  --holder alice.key,alice.share \
+  --holder bob.key,bob.share \
+  --concurrency 50 --duration-secs 30
+```
+
+详见 [docs/operations.md](docs/operations.md#压测)。不要使用真实 Holder 身份或生产数据库。
+
 ## 仓库结构
 
 | 路径 | 说明 |
@@ -142,6 +156,7 @@ cargo run
 | `crates/share` | X25519 份额信封加密 |
 | `crates/admin` | KEK 初始化与份额分发工具 |
 | `crates/server` | gRPC 服务与二进制入口 |
+| `crates/loadtest` | 自动解封、创建测试密钥并压测 Sign 的辅助程序 |
 | `desktop` | Tauri 桌面解封客户端 |
 | `migrations` | PostgreSQL / SQLite 迁移 |
 | `proto` | protobuf 源文件 |

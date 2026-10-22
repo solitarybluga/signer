@@ -27,6 +27,7 @@
 | `database.idle_timeout_secs` | — | `600` | 空闲连接回收时间；`0` 禁用 |
 | `database.max_lifetime_secs` | — | `1800` | 连接最大存活时间；`0` 禁用 |
 | `database.sqlite_busy_timeout_secs` | — | `5` | SQLite 忙等待超时；PostgreSQL 忽略 |
+| `audit.sign_enabled` | — | `true` | 是否为每次 Sign 写入审计；关闭仅用于受控压测 |
 | `logging.level` | `RUST_LOG` | `info` | tracing 过滤级别；`RUST_LOG` 优先 |
 | `logging.format` | — | `text` | `text` 或 `json` |
 | `logging.location` | — | `true` | 是否输出源码文件和行号 |
@@ -50,6 +51,10 @@ session_ttl_secs = 600
 # idle_timeout_secs = 600
 # max_lifetime_secs = 1800
 # sqlite_busy_timeout_secs = 5
+
+[audit]
+# Production should keep this enabled.
+sign_enabled = true
 
 [logging]
 level = "info"
@@ -201,6 +206,49 @@ docker compose --profile server logs -f signer
 2. 在负载均衡后启动 N 个 signer 实例。
 3. 对每个实例执行解封，或设计受控的启动自动解封策略。
 4. 确认审计日志记录了每个实例的解封会话。
+
+## 压测
+
+`signer-loadtest` 是测试辅助程序，会自动解封、创建测试密钥并并发调用 `Sign`。它只应连接隔离环境，使用测试 Holder 身份和份额。
+
+```bash
+SIGNER_LOADTEST_PASSPHRASE='test-passphrase' \
+cargo run -p signer-loadtest -- \
+  --server http://127.0.0.1:50051 \
+  --holder alice.key,alice.share \
+  --holder bob.key,bob.share \
+  --eddsa 10 \
+  --ecdsa 10 \
+  --concurrency 50 \
+  --duration-secs 30
+```
+
+服务已解封时可以跳过解封：
+
+```bash
+cargo run -p signer-loadtest -- \
+  --skip-unseal \
+  --eddsa 1 --ecdsa 1 \
+  --concurrency 50 --duration-secs 30
+```
+
+参数：
+
+- `--holder KEY,SHARE`：Holder 身份文件和 `.share` 文件；可重复。
+- `--skip-unseal`：要求服务已处于 unsealed。
+- `--eddsa` / `--ecdsa`：创建的测试密钥数量。
+- `--concurrency`：并发 `Sign` worker 数。
+- `--duration-secs`：最长压测时间。
+- `--requests`：可选总请求数，和 duration 同时生效。
+
+程序输出 QPS、错误数和 p50/p95/p99/p999 延迟（微秒）。测试结束不会自动 `Seal`，需要手动封存或重置测试环境。
+
+注意：
+
+- 所有 Holder 身份使用 `SIGNER_LOADTEST_PASSPHRASE`，只适用于测试环境。
+- 每次运行会创建新密钥，建议使用专用测试数据库并定期清理。
+- ECDSA 的 payload 固定为 32 字节摘要；Ed25519 使用相同字节也可以。
+- 不要使用真实 Holder 身份、真实份额或生产数据库。
 
 ## 可观测性
 

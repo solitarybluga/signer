@@ -33,8 +33,12 @@ pub struct SignerGrpc {
 }
 
 impl SignerGrpc {
-    pub fn new(unseal: Arc<UnsealManager>, store: Arc<dyn KeyStore>) -> Self {
-        let keystore = Arc::new(Keystore::new(store, unseal.clone()));
+    pub fn with_sign_audit(
+        unseal: Arc<UnsealManager>,
+        store: Arc<dyn KeyStore>,
+        sign_audit: bool,
+    ) -> Self {
+        let keystore = Arc::new(Keystore::new(store, unseal.clone()).with_sign_audit(sign_audit));
         Self { unseal, keystore }
     }
 
@@ -484,7 +488,7 @@ mod tests {
             UnsealManager::bootstrap(UnsealConfig::new(2, 3), holders).unwrap();
         let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
         (
-            SignerGrpc::new(Arc::new(manager), store),
+            SignerGrpc::with_sign_audit(Arc::new(manager), store, true),
             shares,
             test_holders,
         )

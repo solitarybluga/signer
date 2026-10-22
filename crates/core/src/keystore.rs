@@ -4,8 +4,8 @@
 //! DEK, and the DEK is wrapped with the unsealed KEK. Both AEAD
 //! operations bind the key metadata into the AAD.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, RwLock};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -28,6 +28,7 @@ const NONCE_LEN: usize = 24;
 const PRIVATE_KEY_LEN: usize = 32;
 const PRIVATE_AAD_DOMAIN: &[u8] = b"signer.key.private.v1";
 const DEK_AAD_DOMAIN: &[u8] = b"signer.key.dek.v1";
+const KEY_CACHE_CAPACITY: usize = 1024;
 
 /// Errors returned by the keystore.
 #[derive(Debug, Error)]
@@ -80,11 +81,50 @@ impl From<StorageError> for KeystoreError {
 pub struct Keystore {
     store: Arc<dyn KeyStore>,
     unseal: Arc<UnsealManager>,
+    /// Cached `KeyRecord`s contain only ciphertext and wrapped DEKs, never
+    /// plaintext private keys. Keys are immutable after creation in v0.1, so
+    /// entries do not expire; future rotation/state changes must invalidate.
+    key_cache: RwLock<HashMap<KeyId, Arc<KeyRecord>>>,
+    sign_audit: bool,
 }
 
 impl Keystore {
     pub fn new(store: Arc<dyn KeyStore>, unseal: Arc<UnsealManager>) -> Self {
-        Self { store, unseal }
+        Self {
+            store,
+            unseal,
+            key_cache: RwLock::new(HashMap::new()),
+            sign_audit: true,
+        }
+    }
+
+    /// Enable or disable Sign audit records. Intended for controlled
+    /// benchmarks; production deployments should keep Sign audit enabled.
+    pub fn with_sign_audit(mut self, enabled: bool) -> Self {
+        self.sign_audit = enabled;
+        self
+    }
+
+    fn cached_key(&self, id: KeyId) -> Option<Arc<KeyRecord>> {
+        let cache = self
+            .key_cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.get(&id).cloned()
+    }
+
+    fn remember_key(&self, record: Arc<KeyRecord>) {
+        let mut cache = self
+            .key_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.len() >= KEY_CACHE_CAPACITY && !cache.contains_key(&record.id) {
+            // Simple bound: evict an arbitrary entry when the cache is full.
+            if let Some(victim) = cache.keys().next().copied() {
+                cache.remove(&victim);
+            }
+        }
+        cache.insert(record.id, record);
     }
 
     /// Generate an Ed25519 or secp256k1 key, encrypt it, and persist it.
@@ -183,16 +223,26 @@ impl Keystore {
             }
         };
 
-        Ok(KeyMetadata::from(&record))
+        let record = Arc::new(record);
+        self.remember_key(Arc::clone(&record));
+        Ok(KeyMetadata::from(record.as_ref()))
     }
 
     pub async fn get_public_key(&self, id: KeyId) -> Result<KeyMetadata, KeystoreError> {
-        let record = self
-            .store
-            .get_key(id)
-            .await?
-            .ok_or(KeystoreError::NotFound)?;
-        Ok(KeyMetadata::from(&record))
+        let record = match self.cached_key(id) {
+            Some(record) => record,
+            None => {
+                let record = self
+                    .store
+                    .get_key(id)
+                    .await?
+                    .ok_or(KeystoreError::NotFound)?;
+                let record = Arc::new(record);
+                self.remember_key(Arc::clone(&record));
+                record
+            }
+        };
+        Ok(KeyMetadata::from(record.as_ref()))
     }
 
     pub async fn list_keys(&self, page: Page) -> Result<Vec<KeyMetadata>, KeystoreError> {
@@ -207,51 +257,64 @@ impl Keystore {
         actor: &str,
         request_id: Option<&str>,
     ) -> Result<Vec<u8>, KeystoreError> {
-        let record = match self.store.get_key(id).await {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                let _ = self
-                    .audit(
-                        actor,
-                        "Sign",
-                        Some(id),
-                        AuditResult::Denied,
-                        sign_failure_metadata(None, payload.len(), request_id, "not_found"),
-                    )
-                    .await;
-                return Err(KeystoreError::NotFound);
-            }
-            Err(error) => {
-                let _ = self
-                    .audit(
-                        actor,
-                        "Sign",
-                        Some(id),
-                        AuditResult::Error,
-                        sign_failure_metadata(None, payload.len(), request_id, "storage_failed"),
-                    )
-                    .await;
-                return Err(error.into());
-            }
+        let record = match self.cached_key(id) {
+            Some(record) => record,
+            None => match self.store.get_key(id).await {
+                Ok(Some(record)) => {
+                    let record = Arc::new(record);
+                    self.remember_key(Arc::clone(&record));
+                    record
+                }
+                Ok(None) => {
+                    let _ = self
+                        .sign_audit(
+                            actor,
+                            Some(id),
+                            AuditResult::Denied,
+                            sign_failure_metadata(None, payload.len(), request_id, "not_found"),
+                        )
+                        .await;
+                    return Err(KeystoreError::NotFound);
+                }
+                Err(error) => {
+                    let _ = self
+                        .sign_audit(
+                            actor,
+                            Some(id),
+                            AuditResult::Error,
+                            sign_failure_metadata(
+                                None,
+                                payload.len(),
+                                request_id,
+                                "storage_failed",
+                            ),
+                        )
+                        .await;
+                    return Err(error.into());
+                }
+            },
         };
 
         if record.state != KeyState::Active {
             let _ = self
-                .audit(
+                .sign_audit(
                     actor,
-                    "Sign",
                     Some(id),
                     AuditResult::Denied,
-                    sign_failure_metadata(Some(&record), payload.len(), request_id, "not_active"),
+                    sign_failure_metadata(
+                        Some(record.as_ref()),
+                        payload.len(),
+                        request_id,
+                        "not_active",
+                    ),
                 )
                 .await;
             return Err(KeystoreError::KeyNotActive);
         }
         if let Err(error) = ensure_supported(record.curve, record.algorithm) {
             let _ = self
-                .audit(
+                .sign_audit(
                     actor,
-                    "Sign",
                     Some(id),
                     AuditResult::Denied,
                     sign_failure_metadata(
@@ -266,9 +329,8 @@ impl Keystore {
         }
         if record.algorithm == SignatureAlgorithm::Ecdsa && payload.len() != 32 {
             let _ = self
-                .audit(
+                .sign_audit(
                     actor,
-                    "Sign",
                     Some(id),
                     AuditResult::Denied,
                     sign_failure_metadata(
@@ -289,9 +351,8 @@ impl Keystore {
             Ok(Ok(private_key)) => private_key,
             Ok(Err(error)) => {
                 let _ = self
-                    .audit(
+                    .sign_audit(
                         actor,
-                        "Sign",
                         Some(id),
                         AuditResult::Error,
                         sign_failure_metadata(
@@ -306,12 +367,16 @@ impl Keystore {
             }
             Err(error) => {
                 let _ = self
-                    .audit(
+                    .sign_audit(
                         actor,
-                        "Sign",
                         Some(id),
                         AuditResult::Denied,
-                        sign_failure_metadata(Some(&record), payload.len(), request_id, "sealed"),
+                        sign_failure_metadata(
+                            Some(record.as_ref()),
+                            payload.len(),
+                            request_id,
+                            "sealed",
+                        ),
                     )
                     .await;
                 return Err(map_unseal(error));
@@ -328,9 +393,8 @@ impl Keystore {
                     Ok(signature) => signature,
                     Err(error) => {
                         let _ = self
-                            .audit(
+                            .sign_audit(
                                 actor,
-                                "Sign",
                                 Some(id),
                                 AuditResult::Error,
                                 sign_failure_metadata(
@@ -350,16 +414,28 @@ impl Keystore {
 
         // Signing is in-memory; the audit insert is the commit point. If it
         // fails, the signature is not returned to the caller.
-        self.audit(
+        self.sign_audit(
             actor,
-            "Sign",
             Some(id),
             AuditResult::Ok,
-            sign_metadata(Some(&record), payload.len(), request_id),
+            sign_metadata(Some(record.as_ref()), payload.len(), request_id),
         )
         .await?;
 
         Ok(signature)
+    }
+
+    async fn sign_audit(
+        &self,
+        actor: &str,
+        key_id: Option<KeyId>,
+        result: AuditResult,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<(), KeystoreError> {
+        if !self.sign_audit {
+            return Ok(());
+        }
+        self.audit(actor, "Sign", key_id, result, metadata).await
     }
 
     async fn audit(
@@ -783,6 +859,125 @@ mod tests {
         assert_eq!(rows[2].2.as_deref(), Some(unknown_id.as_str()));
         assert_eq!(rows[2].3, "denied");
         assert!(rows[2].4.contains("\"reason\":\"not_found\""));
+    }
+
+    #[tokio::test]
+    async fn sign_audit_can_be_disabled_without_disabling_create_key_audit() {
+        use crate::storage::SqliteStore;
+        use crate::unseal::{HolderIndex, UnsealConfig, UnsealManager};
+
+        let holder_key = Ed25519SigningKey::from_bytes(&[1u8; 32]);
+        let holders = vec![HolderIndex {
+            id: "holder-1".to_string(),
+            index: 1,
+            ed25519_public: hex::encode(holder_key.verifying_key().to_bytes()),
+        }];
+        let (manager, _, _) = UnsealManager::bootstrap(UnsealConfig::new(1, 1), holders).unwrap();
+        manager.force_unseal_for_test([7u8; 32]);
+
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        let keystore = Keystore::new(store.clone(), Arc::new(manager)).with_sign_audit(false);
+
+        let key = keystore
+            .create_key(
+                Curve::Edwards25519,
+                SignatureAlgorithm::EdDsa,
+                BTreeMap::new(),
+                "test-actor",
+            )
+            .await
+            .unwrap();
+        keystore
+            .sign(key.id, b"payload", "test-actor", Some("req-1"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            keystore
+                .sign(Uuid::new_v4(), b"payload", "test-actor", None)
+                .await,
+            Err(KeystoreError::NotFound)
+        ));
+
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT action, result FROM audit_log ORDER BY id")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![("CreateKey".to_string(), "ok".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn sign_uses_cached_encrypted_key_record() {
+        use crate::storage::SqliteStore;
+        use crate::unseal::{HolderIndex, UnsealConfig, UnsealManager};
+
+        let holder_key = Ed25519SigningKey::from_bytes(&[1u8; 32]);
+        let holders = vec![HolderIndex {
+            id: "holder-1".to_string(),
+            index: 1,
+            ed25519_public: hex::encode(holder_key.verifying_key().to_bytes()),
+        }];
+        let (manager, _, _) = UnsealManager::bootstrap(UnsealConfig::new(1, 1), holders).unwrap();
+        manager.force_unseal_for_test([7u8; 32]);
+        let manager = Arc::new(manager);
+
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        let warm = Keystore::new(store.clone(), Arc::clone(&manager));
+        let cold = Keystore::new(store.clone(), Arc::clone(&manager));
+
+        let warm_key = warm
+            .create_key(
+                Curve::Edwards25519,
+                SignatureAlgorithm::EdDsa,
+                BTreeMap::new(),
+                "test-actor",
+            )
+            .await
+            .unwrap();
+        let miss_key = warm
+            .create_key(
+                Curve::Edwards25519,
+                SignatureAlgorithm::EdDsa,
+                BTreeMap::new(),
+                "test-actor",
+            )
+            .await
+            .unwrap();
+
+        // Populate the cold cache through a normal storage read.
+        cold.sign(miss_key.id, b"payload", "test-actor", None)
+            .await
+            .unwrap();
+
+        for id in [warm_key.id, miss_key.id] {
+            sqlx::query("DELETE FROM keys WHERE id = ?")
+                .bind(id.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+
+        // CreateKey populated `warm`; sign must not touch the now-missing row.
+        assert_eq!(
+            warm.sign(warm_key.id, b"payload", "test-actor", None)
+                .await
+                .unwrap()
+                .len(),
+            64
+        );
+        // `cold` loaded miss_key on its first sign and must keep serving it.
+        assert_eq!(
+            cold.sign(miss_key.id, b"payload", "test-actor", None)
+                .await
+                .unwrap()
+                .len(),
+            64
+        );
+        // `cold` never saw warm_key, so it must still hit storage and fail.
+        assert!(matches!(
+            cold.sign(warm_key.id, b"payload", "test-actor", None).await,
+            Err(KeystoreError::NotFound)
+        ));
     }
 
     #[tokio::test]

@@ -35,6 +35,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "starting signer"
     );
 
+    if !config.audit.sign_enabled {
+        tracing::warn!("Sign audit is disabled by configuration");
+    }
+
     let data_dir = &config.server.data_dir;
     let check_path = data_dir.join("kek_check.json");
 
@@ -97,7 +101,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!(%addr, "signer gRPC listening");
 
     Server::builder()
-        .add_service(SignerGrpc::new(Arc::new(manager), store).into_server())
+        .add_service(
+            SignerGrpc::with_sign_audit(Arc::new(manager), store, config.audit.sign_enabled)
+                .into_server(),
+        )
         .serve(addr)
         .await?;
 
