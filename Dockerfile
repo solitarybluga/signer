@@ -1,5 +1,5 @@
-ARG RUST_IMAGE=rust:1.90-bookworm
-ARG RUNTIME_IMAGE=debian:bookworm-slim
+ARG RUST_IMAGE=docker.m.daocloud.io/library/rust:1.90-bookworm
+ARG RUNTIME_IMAGE=docker.m.daocloud.io/library/debian:bookworm-slim
 
 FROM ${RUST_IMAGE} AS builder
 
