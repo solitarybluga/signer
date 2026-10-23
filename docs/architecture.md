@@ -1,6 +1,6 @@
 # 架构
 
-> 状态：草稿——反映 v0.1 设计。存储、解封、Ed25519/secp256k1 keystore、CreateKey/Sign 审计和 mTLS + 客户端证书权限位已实现；ImportKey 与其余操作审计仍在开发中。
+> 状态：草稿——反映 v0.1 设计。存储、解封、Ed25519/secp256k1 keystore、CreateKey/Sign 审计、mTLS + 客户端证书权限位和 CSR 证书签发已实现；ImportKey 与其余操作审计仍在开发中。
 
 ## 目标
 
@@ -111,5 +111,6 @@ sequenceDiagram
 
 - [ ] 解包后的 DEK / 私钥是否缓存，缓存多久？
 - [x] 份额持有者从第一天就启用 mTLS；客户端证书携带 principal/holder 和 u64 权限位（ADR-0008，已实现）。
+- [x] 证书通过 CSR 签发：endpoint 自生成私钥，CA key 口令加密，审批值覆盖 CSR 请求字段（ADR-0009，已实现）。
 - [ ] 审计日志放在同一数据库，还是外部只追加存储？
 - [ ] 份额轮换期间是否需要只读模式？

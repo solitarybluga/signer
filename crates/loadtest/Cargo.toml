@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 signer-holder = { path = "../holder" }
+signer-pki = { path = "../pki" }
 signer-proto = { path = "../proto" }
 signer-share = { path = "../share" }
 tokio.workspace = true

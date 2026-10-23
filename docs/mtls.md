@@ -1,6 +1,6 @@
 # mTLS 与客户端证书权限位
 
-> 状态：已实现（2026-10-23）。服务端、loadtest、桌面端和证书生成脚本已接入；本文描述实际行为。
+> 状态：已实现（2026-10-23）。服务端、loadtest、桌面端、CSR 签发工具和证书脚本已接入；本文描述实际行为。签发决策见 [ADR-0009](adr/0009-csr-certificate-issuance.md)。
 
 ## 1. 目标
 
@@ -11,6 +11,7 @@
   - 没有策略热加载；
   - 没有按客户端的配置白名单。
 - 新增客户端、更换证书或调整权限 = CA 重新签发证书；signer 不重启、不重新解封。
+- 客户端和服务端可以自行生成私钥与 CSR；CA 只签发 CSR，不接触 endpoint 私钥。
 - 明文模式保留为本地开发默认；生产必须显式启用 `[tls]`。
 
 ## 2. 非目标
@@ -195,13 +196,16 @@ cargo run -p signer-loadtest -- \
 
 - 三个 TLS 参数必须同时提供；target 必须是 `https://`。
 - 压测证书需要 `unseal.start/submit/status`、`key.create/read/sign` 位，并在 `holder/*` 中列出所有测试 holder ID。
+- 如果客户端私钥是加密 PKCS#8，设置 `SIGNER_TLS_KEY_PASSPHRASE`（或 `--client-key-passphrase-env` 指定其他变量）；loadtest 在本地解密，不把口令发给服务端。
 - 没有 TLS 参数时保持原有 `http://` 行为。
 
 ### 9.2 桌面端
 
-- 顶部增加可选的 mTLS 设置：CA 证书、客户端证书、客户端私钥，可选 TLS domain。
-- 仅路径持久化到本地，不保存私钥内容或口令。
-- 四个联网命令（发起会话、查询状态、封存、从 vault 提交）都使用同一套 TLS 设置；轮询 `GetUnsealStatus` 也不例外。
+- 顶部增加可选的 mTLS 设置：CA 证书、客户端证书、客户端私钥、可选 TLS domain 和客户端私钥口令。
+- 独立「申请证书」tab：填写 principal、holder ID，权限以复选框勾选；选择私钥/CSR 保存路径并输入口令。私钥使用 PKCS#8 PBES2 加密后落盘，CA 不会接触私钥。
+- 收到 CA 签发的证书后，把证书路径填入「客户端证书」，点击「校验证书与私钥」：客户端会检查证书是否由当前 CA 签发、是否在有效期内、EKU 是否为 clientAuth、证书与私钥是否匹配，并显示 principal/权限/指纹。
+- 四个联网命令（发起会话、查询状态、封存、从 vault 提交）都使用同一套 TLS 设置；轮询 `GetUnsealStatus` 也不例外。加密私钥的口令只在连接调用中传入，不写 `localStorage`。
+- 仅路径和 domain 持久化到本地，不保存私钥内容或口令。
 - Operator 与 Holder 使用不同证书和不同权限位。
 
 ### 9.3 Apifox / grpcurl
@@ -218,15 +222,73 @@ grpcurl \
   signer.v1.SignerService/StartUnseal
 ```
 
-## 10. 证书生成脚本
+## 10. 证书签发
 
-提供：
+有两条路径：生产/多机部署使用 CSR，本机开发可以用集中生成脚本。
 
-- `scripts/gen-mtls.sh`（Git Bash/WSL）
-- `scripts/gen-mtls.ps1`（Windows PowerShell）
-- `scripts/gen-test-certs.sh`（生成 `crates/server/tests/fixtures/mtls/` 的静态测试证书）
+### 10.1 CSR 签发（推荐）
 
-开发证书示例：
+私钥只在 endpoint 生成，CA 只看到 CSR 和公钥。CA **必须忽略 CSR 请求的 SAN/扩展**，用审批后的 principal、holder、权限和 server SAN 重新签发；`signer-pki` 已按此实现。
+
+`signer-admin` 命令：
+
+```bash
+# 1. 在离线 CA 主机创建 CA；私钥用 PKCS#8 PBES2 加密
+export SIGNER_CA_PASSPHRASE='ca-key-passphrase'
+cargo run -p signer-admin -- tls-ca-init --out-dir data/tls
+# 生成 data/tls/ca.crt 和 data/tls/ca.key.enc
+
+# 2. 在 endpoint 主机生成私钥和 CSR（不需要 CA 私钥）
+export SIGNER_TLS_KEY_PASSPHRASE='client-key-passphrase'
+cargo run -p signer-admin -- tls-csr --kind client \
+  --principal alice --holder holder-1 \
+  --permissions unseal.start,unseal.status,key.read \
+  --out-key data/tls/alice.key --out-csr data/tls/alice.csr
+
+# 3. 在 CA 主机审批并签发；CSR 中请求的字段会被覆盖
+export SIGNER_CA_PASSPHRASE='ca-key-passphrase'
+cargo run -p signer-admin -- tls-sign-csr --kind client \
+  --ca-cert data/tls/ca.crt --ca-key data/tls/ca.key.enc \
+  --principal alice --holder holder-1 \
+  --permissions unseal.start,unseal.status,key.read \
+  --csr alice.csr --out alice.crt
+```
+
+服务端证书：
+
+```bash
+cargo run -p signer-admin -- tls-csr --kind server --plaintext-key \
+  --server-san DNS:localhost --server-san IP:127.0.0.1 \
+  --out-key data/tls/server.key --out-csr data/tls/server.csr
+
+cargo run -p signer-admin -- tls-sign-csr --kind server \
+  --server-san DNS:localhost --server-san IP:127.0.0.1 \
+  --csr data/tls/server.csr --out data/tls/server.crt
+```
+
+行为与约束：
+
+- `--permissions` 使用本文的权限名；CA 只接受已知位，`signer-permissions` 是 server/CA/desktop 共用的唯一映射。
+- 客户端私钥默认要求 `SIGNER_TLS_KEY_PASSPHRASE`；`--plaintext-key` 只用于无法解密 PKCS#8 的消费者。当前 signer 服务端证书要求明文 key（0600）；loadtest 和桌面端支持加密 key。
+- CA 私钥必须是加密 PEM；`tls-sign-csr` 拒绝未加密的 CA key，并检查 CA 的 CA 标志、`keyCertSign`、有效期、CA key 与证书是否匹配、CSR 自签名；签发后再自检证书签名。
+- 私钥写入 0600；证书 0644（Unix）。Windows 依赖用户目录 ACL。
+- 口令不进入 argv：CA 口令来自 `SIGNER_CA_PASSPHRASE`，endpoint key 口令来自 `SIGNER_TLS_KEY_PASSPHRASE`；可用 `--passphrase-env` / `--key-passphrase-env` 改变量名。
+- 默认拒绝覆盖，`--force` 才重写。
+- 当前实现使用 rcgen + pkcs8（ECDSA P-256，PKCS#8 PBES2-scrypt/AES-256-CBC），桌面端和 `signer-admin` 不依赖系统 openssl。
+
+脚本封装（内部调用 `signer-admin`，不需要系统 openssl）：
+
+```bash
+scripts/mtls-csr.sh ca-init --out-dir data/tls
+SIGNER_TLS_KEY_PASSPHRASE=... scripts/mtls-csr.sh csr --kind client ...
+SIGNER_CA_PASSPHRASE=... scripts/mtls-csr.sh sign-csr --kind client ...
+```
+
+PowerShell 对应 `scripts/mtls-csr.ps1`。这些脚本会在仓库根目录执行 `cargo run -p signer-admin`。
+
+### 10.2 开发用集中生成（仅本地）
+
+`scripts/gen-mtls.sh`（Git Bash/WSL）和 `scripts/gen-mtls.ps1`（Windows PowerShell）一次生成 CA、服务端和客户端证书，适合本机开发和测试。CA 主机会看到所有私钥，**不要用于生产或多机部署**；生产请使用 10.1 的 CSR 流程。
 
 ```bash
 scripts/gen-mtls.sh --out data/tls \
@@ -250,19 +312,26 @@ PowerShell：
 - 权限名→bit 映射与本文和 Rust 常量保持一致；脚本打印 mask 和证书 SHA-256 指纹，不打印私钥。
 - Unix 下目录 `0700`、私钥 `0600`、证书 `0644`；PowerShell 用 `icacls` 限制当前用户。
 - 默认拒绝覆盖，`--force` 才重建。
-- 测试 fixture 只提交证书和 test-only 客户端/服务端私钥；**不提交 CA 私钥**。
+- 生成的 `ca.key` 未加密，只适合本地开发；CSR 流程的 `ca.key.enc` 才有口令保护。
+
+### 10.3 测试 fixture
+
+`scripts/gen-test-certs.sh` 生成 `crates/server/tests/fixtures/mtls/` 的静态测试证书。测试 fixture 只提交证书和 test-only 客户端/服务端私钥；**不提交 CA 私钥**。签发逻辑的单元测试在运行时临时生成密钥和证书，不依赖这些 fixture。
 
 ## 11. 运维与轮换
 
 - **新增客户端 / 改权限**：CA 重新签发证书；signer 不重启、不解封。
 - **撤销**：使用短有效期证书；本版没有 CRL/OCSP，也没有本地 deny list。证书被窃后在有效期内仍可使用，必须靠短有效期和 CA 流程降低风险。
 - **服务端证书 / client CA bundle 轮换**：仍需重启 signer，重启会丢失 KEK，需要重新门限解封；应规划长有效期根 CA 或后续做自定义 rustls verifier 热加载。
-- **CA 是授权根**：CA 必须强制限制客户端证书里的权限位。如果用户能自己在 CSR 里写 `unseal.seal`/`key.sign`，整套授权失效。建议 CA 模板、审批流程、专用签发入口或 SPIRE 类身份系统。
+- **CA 是授权根**：CA 必须强制限制客户端证书里的权限位。如果用户能自己在 CSR 里写 `unseal.seal`/`key.sign`，整套授权失效。`tls-sign-csr` 只接受命令行显式审批的字段，并丢弃 CSR 请求的 SAN；审批仍应由带外流程完成。建议 CA 模板、审批流程、专用签发入口或 SPIRE 类身份系统。
+- **CA 私钥**：`ca.key.enc` 只能放在离线 CA 主机或 HSM；不要放到 signer、loadtest、桌面端或任何 endpoint 主机。口令只保护静态文件，不能阻止已控制 CA 主机的人签发证书。生产应使用离线 CA/HSM，并限制 `tls-sign-csr` 的调用权限。口令通过环境变量传入以避免出现在 argv，但同一用户仍可能读取进程环境；生产应在专用签发主机上执行。
+- **endpoint 私钥**：桌面端和 loadtest 支持加密 PKCS#8 口令；signer 服务端和部分 gRPC 客户端仍使用明文 key（0600）。不要把 endpoint 私钥交给 CA；CSR 流程只需要公钥。
 - **反向代理**：如果 TLS 在代理终止，代理能看到明文并能改写响应，客户端证书身份也会丢失；需要 TLS passthrough 或在代理到 signer 之间再加 mTLS。
 
 ## 12. 安全边界
 
-- mTLS 只证明“证书由受信 CA 签发”；权限位由 CA 签发策略保证。
+- mTLS 只证明“证书由受信 CA 签发”；权限位由 CA 签发策略保证。CSR 只承载公钥和请求字段，CA 必须重新写入已审批字段；不能把 CSR 原样签成证书。
+- `tls-sign-csr` 会验证 CSR 自签名，但不会因为 CSR 请求了某权限就授予该权限。
 - `SubmitUnsealShare` 仍由 Holder Ed25519 签名、会话 nonce 和 VSS 校验保护；证书权限只是网络/接口层的额外约束。
 - 解封后 KEK 和完整私钥在单进程内存中；mTLS 不改变这一点。
 - 明文模式仍存在；生产必须启用 `[tls]` 并保持 `data/`、私钥文件和 CA 私钥的权限隔离。
@@ -277,6 +346,10 @@ PowerShell：
 - [x] `unseal.start` 与 `unseal.submit` 分离；holder 绑定正确。
 - [x] 保留位/全 1/17 位 mask 被拒绝。
 - [x] 新签发证书立即可用，无需重启 signer。
+- [x] CSR 签发的证书可直接被服务端接受；服务端运行期间新签发的证书无需重启即可使用。
+- [x] CA 忽略 CSR 请求的 principal/holder/权限/SAN，只写入审批值。
+- [x] CSR 自签名被篡改时拒绝签发；CA 私钥未加密、口令错误、CA 与 key 不匹配时拒绝签发。
+- [x] CA 私钥为加密 PKCS#8；桌面端私钥可为加密 PKCS#8，并校验证书与私钥匹配。
 - [x] `audit_log.actor` 来自证书 principal。
 - [x] 日志、错误和审计中没有私钥、key 内容或完整证书。
 

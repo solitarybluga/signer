@@ -10,6 +10,8 @@ description = "Desktop client for the signer quorum unsealing flow"
 hex.workspace = true
 serde.workspace = true
 signer-holder = { path = "../../crates/holder" }
+signer-permissions = { path = "../../crates/permissions" }
+signer-pki = { path = "../../crates/pki" }
 signer-proto = { path = "../../crates/proto" }
 signer-share = { path = "../../crates/share" }
 tauri.workspace = true

@@ -14,9 +14,9 @@ use time::Duration;
 const DEFAULT_GRPC_ADDR: &str = "127.0.0.1:50051";
 const DEFAULT_DATA_DIR: &str = "data";
 const DEFAULT_SESSION_TTL_SECS: u64 = 600;
-pub const DEFAULT_PRINCIPAL_URI_PREFIX: &str = "signer://principal/";
-pub const DEFAULT_HOLDER_URI_PREFIX: &str = "signer://holder/";
-pub const DEFAULT_PERMISSION_URI_PREFIX: &str = "signer://permissions/";
+pub use signer_permissions::{
+    DEFAULT_HOLDER_URI_PREFIX, DEFAULT_PERMISSION_URI_PREFIX, DEFAULT_PRINCIPAL_URI_PREFIX,
+};
 
 /// Server configuration.
 #[derive(Debug, Clone, Default, Deserialize)]

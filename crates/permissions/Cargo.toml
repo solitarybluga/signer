@@ -1,0 +1,10 @@
+[package]
+name = "signer-permissions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Client certificate permission bitmask protocol for signer"
+
+[dependencies]
+thiserror.workspace = true

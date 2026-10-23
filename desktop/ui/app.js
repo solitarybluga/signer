@@ -41,6 +41,7 @@ function tlsSettings() {
     client_cert_path: cert,
     client_key_path: key,
     domain: valueOf("tls-domain") || null,
+    client_key_passphrase: byId("tls-client-key-passphrase").value || null,
   };
 }
 
@@ -66,6 +67,102 @@ function rememberTlsSettings() {
         // localStorage is optional.
       }
     });
+  }
+}
+
+async function generateTlsCsr() {
+  if (busy) {
+    return;
+  }
+  const principal = valueOf("tls-csr-principal");
+  const keyPath = valueOf("tls-csr-key-path");
+  const csrPath = valueOf("tls-csr-path");
+  const passphrase = byId("tls-csr-passphrase").value;
+
+  if (!principal || !keyPath || !csrPath || !passphrase) {
+    appendLog("请填写 principal、选择私钥和 CSR 路径，并输入私钥口令", "error");
+    return;
+  }
+
+  const holders = valueOf("tls-csr-holders")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  setBusy(true);
+  try {
+    const view = await invokeCommand("tls_generate_client_csr", {
+      principal,
+      holder_ids: holders,
+      permissions: selectedPermissions(),
+      key_path: keyPath,
+      csr_path: csrPath,
+      passphrase,
+    });
+    appendLog(
+      `CSR 已生成：${view.csr_path}（权限 ${view.permissions || "无"} / ${view.permissions_mask}）`,
+      "ok",
+    );
+    byId("tls-client-key").value = view.key_path;
+    byId("tls-client-key").dispatchEvent(new Event("input", { bubbles: true }));
+    byId("tls-client-key-passphrase").value = passphrase;
+    appendLog("把 CSR 交给 CA 签名；收到证书后填入「客户端证书」并校验证书", "info");
+  } catch (error) {
+    appendLog(String(error), "error");
+  } finally {
+    clearPassphrases(["tls-csr-passphrase"]);
+    setBusy(false);
+  }
+}
+
+async function validateTlsCert() {
+  if (busy) {
+    return;
+  }
+  const tls = tlsSettings();
+  if (tls === undefined) {
+    return;
+  }
+  if (!tls) {
+    appendLog("请先选择 CA 证书、客户端证书和客户端私钥", "error");
+    return;
+  }
+
+  setBusy(true);
+  try {
+    const view = await invokeCommand("tls_validate_client_cert", {
+      ca_cert_path: tls.ca_cert_path,
+      client_cert_path: tls.client_cert_path,
+      client_key_path: tls.client_key_path,
+      passphrase: tls.client_key_passphrase,
+    });
+    appendLog(
+      `证书有效：principal=${view.principal} 权限=${view.permissions || "无"} 指纹=${view.fingerprint_sha256}`,
+      "ok",
+    );
+    if (view.holder_ids.length > 0) {
+      appendLog(`holder 绑定：${view.holder_ids.join(", ")}`, "info");
+    }
+  } catch (error) {
+    appendLog(String(error), "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
+function selectedPermissions() {
+  return Array.from(
+    document.querySelectorAll("#tls-csr-permissions input[type='checkbox']:checked"),
+  )
+    .map((input) => input.value)
+    .join(",");
+}
+
+function setPermissionCheckboxes(checked) {
+  for (const input of document.querySelectorAll(
+    "#tls-csr-permissions input[type='checkbox']",
+  )) {
+    input.checked = checked;
   }
 }
 
@@ -116,6 +213,8 @@ function setBusy(value) {
     "export-public-btn",
     "import-share-btn",
     "submit-vault-btn",
+    "generate-tls-csr",
+    "validate-tls-cert",
   ]) {
     byId(id).disabled = value;
   }
@@ -511,6 +610,7 @@ const tabButtons = Array.from(document.querySelectorAll(".tab"));
 const tabPanels = {
   operator: byId("tab-operator"),
   holder: byId("tab-holder"),
+  cert: byId("tab-cert"),
 };
 
 function activateTab(name, focus = false) {
@@ -671,6 +771,18 @@ byId("pick-tls-client-cert").addEventListener("click", () =>
 byId("pick-tls-client-key").addEventListener("click", () =>
   pickOpen("tls-client-key", certFilters),
 );
+byId("pick-tls-csr-key").addEventListener("click", () =>
+  pickSave("tls-csr-key-path", "client.key", [
+    { name: "Private key", extensions: ["key"] },
+  ]),
+);
+byId("pick-tls-csr-path").addEventListener("click", () =>
+  pickSave("tls-csr-path", "client.csr", [{ name: "CSR", extensions: ["csr"] }]),
+);
+byId("generate-tls-csr").addEventListener("click", generateTlsCsr);
+byId("validate-tls-cert").addEventListener("click", validateTlsCert);
+byId("tls-permissions-all").addEventListener("click", () => setPermissionCheckboxes(true));
+byId("tls-permissions-none").addEventListener("click", () => setPermissionCheckboxes(false));
 
 loadTlsSettings();
 rememberTlsSettings();

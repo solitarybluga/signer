@@ -7,6 +7,7 @@
 #
 # This script is for development and testing. Production CAs must enforce the
 # permission bits during issuance; never use the generated CA for production.
+# For the CSR workflow (endpoint keys never reach the CA), use mtls-csr.ps1.
 
 param(
     [string]$Out = "data/tls",

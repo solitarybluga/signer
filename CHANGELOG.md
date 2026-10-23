@@ -27,6 +27,12 @@
 - 实现 gRPC mTLS：服务端 `[tls]` 配置、客户端证书 principal/holder/u64 权限位解析、逐 RPC 权限检查、holder 绑定，以及 CreateKey/Sign 的证书 actor 审计。
 - `signer-loadtest` 与 Tauri 桌面端接入 mTLS；新增 `scripts/gen-mtls.sh` / `gen-mtls.ps1` 和静态测试证书。
 - `signer.example.toml` 增加 `[tls]` 配置示例；默认仍为明文本地开发模式。
+- 新增 `signer-permissions` 共享 crate：server、CA、桌面端共用权限位、权限名与 SAN URI 协议。
+- 新增 `signer-pki`（rcgen + pkcs8）：CA 生成、endpoint key+CSR、CSR 签发、加密 PKCS#8 私钥、证书/私钥匹配校验。
+- `signer-admin` 新增 `tls-ca-init` / `tls-csr` / `tls-sign-csr`：CA key 使用口令加密，CA 忽略 CSR 请求字段，只用审批的 principal/holder/permissions/server SAN 签发。
+- 桌面端新增独立「申请证书」tab，权限以复选框勾选；支持生成客户端 key+CSR、加密私钥口令和证书校验。loadtest 支持解密加密客户端 key。
+- 新增 `scripts/mtls-csr.sh` / `mtls-csr.ps1`（封装 `signer-admin` CSR 流程）和 ADR-0009；`gen-mtls.sh`/`.ps1` 保留为本地开发集中生成。
+- 新增服务端集成测试：CSR 签发证书可直接通过 mTLS，且运行期间新签发证书无需重启即可使用。
 - 将解封接口接入 gRPC（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal），新增服务启动流程与数据目录初始化。
 - 新增 Tauri 桌面解封客户端（`desktop/`）：发起会话、提交份额、进度展示与重新封存。
 - 新增 `signer-admin`：X25519 持有者密钥生成、KEK 初始化、加密份额导出。

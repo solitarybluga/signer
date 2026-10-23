@@ -15,8 +15,6 @@ use zeroize::Zeroizing;
 use crate::config::{ConfigError, TlsConfig};
 use crate::permissions::PermissionSet;
 
-const MAX_IDENTITY_LEN: usize = 128;
-
 /// Authenticated identity extracted from a client certificate.
 #[derive(Debug, Clone)]
 pub struct Principal {
@@ -212,7 +210,7 @@ fn parse_principal(
 }
 
 fn validate_identity(value: &str, kind: &str) -> Result<(), Status> {
-    if value.is_empty() || value.len() > MAX_IDENTITY_LEN || value.chars().any(char::is_control) {
+    if !crate::permissions::is_valid_identity(value) {
         return Err(Status::permission_denied(format!(
             "client certificate {kind} is invalid"
         )));
@@ -293,10 +291,23 @@ mod tests {
     }
 
     #[test]
+    fn pki_key_match_supports_existing_rsa_fixtures() {
+        let cert = std::fs::read_to_string(fixture_path("client-alice.pem")).unwrap();
+        let key = std::fs::read_to_string(fixture_path("client-alice.key")).unwrap();
+        signer_pki::certificate_matches_key(&cert, &key, None).unwrap();
+    }
+
+    #[test]
     fn rejects_invalid_identity_lengths() {
         assert!(validate_identity("", "principal").is_err());
         assert!(validate_identity("alice", "principal").is_ok());
-        assert!(validate_identity(&"a".repeat(MAX_IDENTITY_LEN + 1), "principal").is_err());
+        assert!(
+            validate_identity(
+                &"a".repeat(signer_permissions::MAX_IDENTITY_LEN + 1),
+                "principal"
+            )
+            .is_err()
+        );
         assert!(validate_identity("ali\nce", "principal").is_err());
     }
 
@@ -370,11 +381,11 @@ mod tests {
         (addr, shutdown_tx, handle)
     }
 
-    async fn connect(
+    async fn connect_with_ca(
         addr: std::net::SocketAddr,
+        ca: &[u8],
         client_identity: Option<(&[u8], &[u8])>,
     ) -> Result<SignerServiceClient<Channel>, String> {
-        let ca = fixture("ca.pem");
         let mut tls = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(ca))
             .domain_name("127.0.0.1");
@@ -391,11 +402,12 @@ mod tests {
         Ok(SignerServiceClient::new(channel))
     }
 
-    async fn start_unseal_code(
+    async fn start_unseal_code_with_ca(
         addr: std::net::SocketAddr,
+        ca: &[u8],
         client_identity: Option<(&[u8], &[u8])>,
     ) -> Result<(), tonic::Code> {
-        let mut client = connect(addr, client_identity)
+        let mut client = connect_with_ca(addr, ca, client_identity)
             .await
             .map_err(|_| tonic::Code::Unavailable)?;
         client
@@ -403,6 +415,13 @@ mod tests {
             .await
             .map(|_| ())
             .map_err(|status| status.code())
+    }
+
+    async fn start_unseal_code(
+        addr: std::net::SocketAddr,
+        client_identity: Option<(&[u8], &[u8])>,
+    ) -> Result<(), tonic::Code> {
+        start_unseal_code_with_ca(addr, &fixture("ca.pem"), client_identity).await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -454,6 +473,101 @@ mod tests {
         .await
         .expect("rogue client did not finish");
         assert!(result.is_err());
+
+        let _ = shutdown_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn csr_issued_certificates_are_accepted_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = signer_pki::generate_ca("test-ca", 30, "ca-passphrase").unwrap();
+        let server_sans = vec!["DNS:localhost".to_string(), "IP:127.0.0.1".to_string()];
+        let server_csr = signer_pki::generate_server_csr(&server_sans, None, None).unwrap();
+        let server_cert = signer_pki::sign_server_csr(
+            &ca.cert_pem,
+            ca.key_pem.as_str(),
+            "ca-passphrase",
+            &server_csr.csr_pem,
+            &server_sans,
+            None,
+            30,
+        )
+        .unwrap();
+
+        let ca_path = dir.path().join("ca.pem");
+        let server_cert_path = dir.path().join("server.pem");
+        let server_key_path = dir.path().join("server.key");
+        std::fs::write(&ca_path, &ca.cert_pem).unwrap();
+        std::fs::write(&server_cert_path, &server_cert.cert_pem).unwrap();
+        std::fs::write(&server_key_path, server_csr.key_pem.as_bytes()).unwrap();
+
+        let tls = TlsConfig {
+            cert_path: server_cert_path,
+            key_path: server_key_path,
+            client_ca_path: ca_path,
+            principal_uri_prefix: DEFAULT_PRINCIPAL_URI_PREFIX.to_string(),
+            holder_uri_prefix: DEFAULT_HOLDER_URI_PREFIX.to_string(),
+            permission_uri_prefix: DEFAULT_PERMISSION_URI_PREFIX.to_string(),
+        };
+        let (addr, shutdown_tx, handle) = start_test_server(&tls).await;
+        let permissions =
+            signer_permissions::PermissionSet::parse_list("unseal.start,unseal.status").unwrap();
+
+        let issue = |principal: &str| {
+            let holders = vec!["holder-1".to_string()];
+            let csr = signer_pki::generate_client_csr(
+                principal,
+                &holders,
+                permissions,
+                Some("key-passphrase"),
+                None,
+            )
+            .unwrap();
+            let issued = signer_pki::sign_client_csr(
+                &ca.cert_pem,
+                ca.key_pem.as_str(),
+                "ca-passphrase",
+                &csr.csr_pem,
+                principal,
+                &holders,
+                permissions,
+                None,
+                30,
+            )
+            .unwrap();
+            let key =
+                signer_pki::load_private_key_pem(&csr.key_pem, Some("key-passphrase")).unwrap();
+            (issued.cert_pem, key)
+        };
+
+        let (alice_cert, alice_key) = issue("alice");
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            start_unseal_code_with_ca(
+                addr,
+                ca.cert_pem.as_bytes(),
+                Some((alice_cert.as_bytes(), alice_key.as_bytes())),
+            ),
+        )
+        .await
+        .expect("CSR-issued client did not finish");
+        assert_eq!(result, Ok(()));
+
+        // The server process is still running; a newly issued certificate must
+        // work without a restart or re-unseal.
+        let (bob_cert, bob_key) = issue("bob");
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            start_unseal_code_with_ca(
+                addr,
+                ca.cert_pem.as_bytes(),
+                Some((bob_cert.as_bytes(), bob_key.as_bytes())),
+            ),
+        )
+        .await
+        .expect("newly issued client did not finish");
+        assert_eq!(result, Ok(()));
 
         let _ = shutdown_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;

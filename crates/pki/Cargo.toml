@@ -1,0 +1,19 @@
+[package]
+name = "signer-pki"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CSR, CA and certificate helpers for signer mTLS"
+
+[dependencies]
+hex.workspace = true
+pkcs8.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+sha2.workspace = true
+signer-permissions = { path = "../permissions" }
+thiserror.workspace = true
+time.workspace = true
+x509-parser = { workspace = true, features = ["verify"] }
+zeroize.workspace = true

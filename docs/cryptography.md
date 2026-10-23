@@ -706,7 +706,14 @@ URI:signer://permissions/0x<16-hex>    (u64 权限位掩码，最多一个)
 
 权限位使用 u64，bit 0–7 对应 `unseal.start/submit/status/seal`、`key.create/import/read/sign`；bit 8/9 预留给未来的 `key.destroy`/`audit.read`，在对应 RPC 实现前也必须为 0；bit 10–63 保留。**保留位为 1 的证书必须被拒绝**（包括 bit 8/9、bit 63、全 1 mask），不能忽略或当通配符；mask 0 表示无权限，不表示全部权限。位号只追加、不重排、不复用。
 
-每个 RPC 在产生副作用前检查固定权限；`CreateKey`/`Sign` 审计 actor 来自证书 principal。CA 是授权根：CA 必须在签发时强制限制权限位，否则客户端可自行申请 `unseal.seal`/`key.sign`。详见 [mtls.md](mtls.md) 和 [ADR-0008](adr/0008-mtls-client-cert-permissions.md)。
+每个 RPC 在产生副作用前检查固定权限；`CreateKey`/`Sign` 审计 actor 来自证书 principal。CA 是授权根：CA 必须在签发时强制限制权限位，否则客户端可自行申请 `unseal.seal`/`key.sign`。详见 [mtls.md](mtls.md)、[ADR-0008](adr/0008-mtls-client-cert-permissions.md) 和 [ADR-0009](adr/0009-csr-certificate-issuance.md)。
+
+### 证书签发
+
+- Endpoint 在本机生成 ECDSA P-256 私钥和 PKCS#10 CSR（`signer-pki`，rcgen）；私钥可以再用 PKCS#8 PBES2（scrypt + AES-256-CBC）口令加密。
+- CA 只使用 CSR 的公钥，并验证 CSR 自签名；CSR 请求的 SAN、EKU、keyUsage、有效期和扩展全部丢弃，证书内容来自 CA 的显式审批参数（principal、holder、permission mask、server SAN）。
+- CA 私钥以加密 PKCS#8 保存，口令来自环境变量；`tls-sign-csr` 拒绝未加密的 CA key。CA key 是授权根，应离线保存或放入 HSM。
+- 签发前检查 CA 的 `CA:TRUE`、`keyCertSign`、有效期和 key 匹配；签发后自检证书签名。桌面端导入证书时再校验 CA 签名、有效期、EKU 和证书/私钥匹配。
 
 ### 目标行为
 
@@ -738,7 +745,9 @@ ADR-0005 明确 v0.1 不用 KMS 托管 KEK，以保持门限信任模型：如�
 | `argon2` 0.5 | Argon2id 口令 KDF | ✅ |
 | `rand` 0.8 | `OsRng` 随机数 | ✅ |
 | `zeroize` 1 | 秘密内存擦除 | ✅ |
-| `x509-parser` 0.18 | 解析客户端证书 SAN URI（mTLS 权限位） | ✅ |
+| `x509-parser` 0.18 | 解析客户端证书 SAN URI、校验 CA/证书签名 | ✅ |
+| `rcgen` 0.14 | 生成 CA、endpoint key/CSR、签发证书 | ✅ |
+| `pkcs8` 0.11 | 加密/解密 PKCS#8 私钥（PBES2） | ✅ |
 | `sharks` | 旧 GF(256) Shamir | 🕘 已移除 |
 | `vsss-rs` | 现成 VSS 实现 | 🔍 未采用：依赖 curve25519-dalek 5 的 `ff`/`group` trait，会与现有 4.x 依赖栈重复 |
 
@@ -749,6 +758,7 @@ ADR-0005 明确 v0.1 不用 KMS 托管 KEK，以保持门限信任模型：如�
 ## 21. 安全边界与已知限制
 
 - **mTLS 默认关闭**：已实现，但未配置 `[tls]` 时 gRPC 仍是明文，服务端身份未认证；中间人可替换会话公钥。生产环境必须启用，见第 18 节。
+- **CA key 只有文件级口令保护**：`ca.key.enc` 的 PBES2 口令不能阻止已控制 CA 主机或 `tls-sign-csr` 运行环境的攻击者签发证书；生产应使用离线 CA/HSM，并限制签发权限。CSR 流程降低私钥分发面，但不替代审批。
 - **可信 dealer**：`signer-admin init` 在初始化时能看到全部明文份额；它必须被信任不会保留份额。
 - **Feldman 的 C0 公开**：KEK 的群元素公开，隐藏性依赖离散对数假设。
 - **自研 VSS**：`crates/vss` 未经独立审计；需要测试向量、外部评审和侧信道评估。

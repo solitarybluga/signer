@@ -64,7 +64,7 @@ location = true
 
 ### mTLS（已实现）
 
-mTLS 和客户端证书权限位的完整设计见 [mtls.md](mtls.md) 与 [ADR-0008](adr/0008-mtls-client-cert-permissions.md)。配置：
+mTLS 和客户端证书权限位的完整设计见 [mtls.md](mtls.md)、[ADR-0008](adr/0008-mtls-client-cert-permissions.md) 与 [ADR-0009](adr/0009-csr-certificate-issuance.md)。配置：
 
 | TOML 配置 | 环境变量覆盖 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -79,6 +79,8 @@ mTLS 和客户端证书权限位的完整设计见 [mtls.md](mtls.md) 与 [ADR-0
 - `[tls]` 缺失时保持明文模式，启动日志会 warn；生产必须显式启用。
 - 客户端证书携带 `principal`、可选 `holder` 和 u64 权限位掩码；没有本地授权策略文件，也没有热加载。
 - 未配置 `[tls]` 时保持明文模式，启动日志会 warn；生产必须显式启用。
+- 推荐用 CSR 流程签发：endpoint 执行 `signer-admin tls-csr` 生成自己的 key+CSR，CA 执行 `tls-sign-csr` 并用审批值覆盖请求字段；CA key 用 `SIGNER_CA_PASSPHRASE` 保护的 `ca.key.enc`，只能放在离线 CA 主机/HSM，不能放到 signer 主机。
+- 客户端加密私钥可用 `SIGNER_TLS_KEY_PASSPHRASE`（loadtest）或桌面端口令输入框解密；服务端 `tls.key_path` 目前仍要求明文 PEM（0600）。
 - 镜像支持 TLS/mTLS，但默认关闭；启用后证书应以只读方式挂载，并确保容器运行用户可读。
 
 `signer.toml` 可能包含数据库密码，建议权限设为 `0600`，不要把真实配置提交到仓库。
@@ -242,7 +244,7 @@ cargo run -p signer-loadtest -- \
   --duration-secs 30
 ```
 
-启用 mTLS 时使用 `https://`，并同时提供 CA、客户端证书和客户端私钥；压测证书需要 `unseal.start/submit/status`、`key.create/read/sign` 权限位，并在 `holder/*` 中列出所有测试 holder：
+启用 mTLS 时使用 `https://`，并同时提供 CA、客户端证书和客户端私钥；压测证书需要 `unseal.start/submit/status`、`key.create/read/sign` 权限位，并在 `holder/*` 中列出所有测试 holder。客户端私钥可以是加密 PKCS#8，设置 `SIGNER_TLS_KEY_PASSPHRASE` 由 loadtest 本地解密：
 
 ```bash
 SIGNER_LOADTEST_PASSPHRASE='test-passphrase' \
@@ -274,6 +276,9 @@ cargo run -p signer-loadtest -- \
 - `--concurrency`：并发 `Sign` worker 数。
 - `--duration-secs`：最长压测时间。
 - `--requests`：可选总请求数，和 duration 同时生效。
+- `--ca-cert` / `--client-cert` / `--client-key`：mTLS 三件套，必须同时提供。
+- `--tls-domain`：证书 SAN 与连接地址不一致时的服务端名称覆盖。
+- `--client-key-passphrase-env`：加密客户端私钥的口令环境变量，默认 `SIGNER_TLS_KEY_PASSPHRASE`。
 
 程序输出 QPS、错误数和 p50/p95/p99/p999 延迟（微秒）。测试结束不会自动 `Seal`，需要手动封存或重置测试环境。
 

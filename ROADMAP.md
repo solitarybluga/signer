@@ -12,6 +12,7 @@
 - [x] 解封会话、份额收集与 KEK 恢复（核心）
 - [x] 持有者 Ed25519 签名、会话 nonce 绑定、每会话 X25519 份额加密与 VSS 校验
 - [x] gRPC mTLS + 客户端证书权限位（见 [docs/mtls.md](docs/mtls.md)）
+- [x] CSR 证书签发：endpoint 自生成 key+CSR、CA 口令加密私钥、桌面端/`signer-admin`/脚本（ADR-0009）
 - [x] 通过 gRPC 接入解封流程（`StartUnseal` / `SubmitUnsealShare` / `GetUnsealStatus` / `Seal`）
 - [x] EdDSA/ECDSA gRPC 接口：`CreateKey`、`GetPublicKey`、`ListKeys`、`Sign`
 - [ ] `ImportKey`

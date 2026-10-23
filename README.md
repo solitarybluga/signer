@@ -32,7 +32,7 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 | 桌面端 Holder 身份、份额 vault 与解封提交（Tauri） | ✅ 已实现 |
 | 加密 keystore（DEK/KEK 信封） | ✅ Ed25519 与 secp256k1 已实现 |
 | 份额提交加密与持有者签名 | ✅ 已实现（每会话 X25519 + Ed25519） |
-| gRPC mTLS + 客户端证书权限位 | ✅ 已实现（服务端、loadtest、桌面端；见 [docs/mtls.md](docs/mtls.md)） |
+| gRPC mTLS + 客户端证书权限位 | ✅ 已实现（服务端、loadtest、桌面端；支持 CSR 签发；见 [docs/mtls.md](docs/mtls.md)） |
 | 密钥管理接口与签名 | ✅ EdDSA/ECDSA 的 CreateKey/GetPublicKey/ListKeys/Sign 已实现；ImportKey 未实现 |
 
 ## v0.1 目标特性
@@ -99,7 +99,7 @@ VSS 解封使用 `kek_check.json` v3（包含 holder Ed25519 注册表）、mani
 
 服务端默认读取工作目录下的 `signer.toml`；可用 `--config <path>` 或 `SIGNER_CONFIG` 指定其他路径。配置示例见 [`signer.example.toml`](signer.example.toml)，实际 `signer.toml` 已被 gitignore。环境变量 `SIGNER_GRPC_ADDR`、`SIGNER_DATA_DIR`、`SIGNER_SESSION_TTL_SECS`、`SIGNER_DATABASE_URL` 会覆盖配置文件中的对应值；mTLS 证书可用 `SIGNER_TLS_CERT`、`SIGNER_TLS_KEY`、`SIGNER_TLS_CLIENT_CA` 覆盖，三项必须同时存在。未配置 `database.url` 时，默认使用 `$data_dir/signer.db`（SQLite）；`postgres://...` 则使用 PostgreSQL。连接池参数（`max_connections`、`min_connections`、`acquire_timeout_secs`、`idle_timeout_secs`、`max_lifetime_secs`）也在 `[database]` 中配置。
 
-mTLS 与客户端证书权限位已实现：配置、证书 SAN URI 格式、u64 权限位和运维边界见 [docs/mtls.md](docs/mtls.md) 与 [ADR-0008](docs/adr/0008-mtls-client-cert-permissions.md)。未配置 `[tls]` 时 gRPC 仍是明文，只能在本机或可信网络使用。
+mTLS 与客户端证书权限位已实现：配置、证书 SAN URI 格式、u64 权限位和运维边界见 [docs/mtls.md](docs/mtls.md) 与 [ADR-0008](docs/adr/0008-mtls-client-cert-permissions.md)。证书签发支持 CSR 流程：endpoint 自己生成私钥和 CSR，CA 使用口令加密的私钥签名，并用审批值覆盖 CSR 请求的身份/权限（[ADR-0009](docs/adr/0009-csr-certificate-issuance.md)）。未配置 `[tls]` 时 gRPC 仍是明文，只能在本机或可信网络使用。
 
 日志使用 `tracing`，默认 `info` 级别并输出源码文件和行号；可在 `signer.toml` 的 `[logging]` 中设置 `level` / `format` / `location`，或用 `RUST_LOG` 覆盖级别，例如 `RUST_LOG=signer_server=debug,sqlx=warn`。`[audit].sign_enabled` 控制是否记录每次 Sign 审计，默认 `true`；生产环境不应关闭。
 
@@ -133,7 +133,7 @@ cd desktop/src-tauri
 cargo run
 ```
 
-默认连接 `http://127.0.0.1:50051`。界面顶部可在「操作员」和「份额持有者」之间切换；持有者 tab 内再分「密钥分发」和「Unseal」：前者生成身份、导出公开信息、导入并验证 `.share`、把份额加密保存为本地 vault，后者用身份文件 + vault 解锁，把份额加密到会话临时公钥并用 Ed25519 签名后提交。manifest 三项（`manifest.json`、`manifest.sig`、`operator.pub`）可选；不提供时按 legacy 方式导入并显示未验签警告。顶部「mTLS 证书」可配置 CA、客户端证书和客户端私钥；未配置时使用明文，仅限本机或可信网络。
+默认连接 `http://127.0.0.1:50051`。界面顶部可在「操作员」和「份额持有者」之间切换；持有者 tab 内再分「密钥分发」和「Unseal」：前者生成身份、导出公开信息、导入并验证 `.share`、把份额加密保存为本地 vault，后者用身份文件 + vault 解锁，把份额加密到会话临时公钥并用 Ed25519 签名后提交。manifest 三项（`manifest.json`、`manifest.sig`、`operator.pub`）可选；不提供时按 legacy 方式导入并显示未验签警告。顶部「mTLS 证书」可配置 CA、客户端证书、客户端私钥和加密私钥口令；独立「申请证书」tab 可勾选权限并在本机生成客户端私钥 + CSR，之后可校验证书与私钥。未配置时使用明文，仅限本机或可信网络。
 
 ### 压测
 
@@ -158,7 +158,9 @@ cargo run -p signer-loadtest -- \
 | `crates/vss` | Ristretto255 Feldman VSS：份额生成、验证与恢复 |
 | `crates/holder` | Holder 身份、manifest 验签、share vault 与份额导入 |
 | `crates/share` | X25519 份额信封加密 |
-| `crates/admin` | KEK 初始化与份额分发工具 |
+| `crates/permissions` | 客户端证书权限位协议（server/CA/desktop 共用） |
+| `crates/pki` | CSR、CA 与证书签发（rcgen + pkcs8） |
+| `crates/admin` | KEK 初始化、份额分发与 mTLS CA/CSR 工具 |
 | `crates/server` | gRPC 服务与二进制入口 |
 | `crates/loadtest` | 自动解封、创建测试密钥并压测 Sign 的辅助程序 |
 | `desktop` | Tauri 桌面解封客户端 |
@@ -198,6 +200,8 @@ gRPC 定义见 [`proto/signer/v1/signer.proto`](proto/signer/v1/signer.proto)。
 | [docs/unseal-protocol.md](docs/unseal-protocol.md) | 门限解封协议 |
 | [docs/vss-unseal.md](docs/vss-unseal.md) | VSS 增强解封方案与实现说明 |
 | [docs/adr/0007-vss-feldman-ristretto255.md](docs/adr/0007-vss-feldman-ristretto255.md) | ADR-0007：Ristretto255 Feldman VSS |
+| [docs/adr/0008-mtls-client-cert-permissions.md](docs/adr/0008-mtls-client-cert-permissions.md) | ADR-0008：mTLS 与客户端证书权限位 |
+| [docs/adr/0009-csr-certificate-issuance.md](docs/adr/0009-csr-certificate-issuance.md) | ADR-0009：CSR 驱动的证书签发 |
 | [docs/storage.md](docs/storage.md) | 存储 trait、表结构、HA |
 | [docs/operations.md](docs/operations.md) | 配置、可观测性、运维手册 |
 | [desktop/README.md](desktop/README.md) | Tauri 桌面客户端 |

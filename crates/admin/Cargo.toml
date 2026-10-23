@@ -16,6 +16,8 @@ serde.workspace = true
 serde_json.workspace = true
 signer-core = { path = "../core" }
 signer-holder = { path = "../holder" }
+signer-permissions = { path = "../permissions" }
+signer-pki = { path = "../pki" }
 signer-share = { path = "../share" }
 uuid.workspace = true
 zeroize.workspace = true

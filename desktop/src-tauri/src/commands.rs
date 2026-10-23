@@ -9,6 +9,8 @@ use signer_holder::{
     HolderError, HolderIdentity, ManifestPackage, ShareVault, VaultInfo, decode_operator_public,
     decode_signature, import_share, operator_fingerprint,
 };
+use signer_permissions::PermissionSet;
+use signer_pki::{ClientCertificateInfo, PkiError};
 use signer_proto::pb;
 use signer_proto::pb::signer_service_client::SignerServiceClient;
 
@@ -119,6 +121,44 @@ fn holder_error(error: HolderError) -> String {
     }
 }
 
+fn pki_error(error: PkiError) -> String {
+    match error {
+        PkiError::KeyPassphraseRequired => "客户端私钥已加密，请输入口令".to_string(),
+        PkiError::KeyDecryptFailed => "私钥口令错误或文件已损坏".to_string(),
+        PkiError::CaKeyDecryptFailed | PkiError::CaKeyMustBeEncrypted => {
+            "CA 私钥口令错误或格式不受支持".to_string()
+        }
+        PkiError::KeyMismatch => "客户端证书与私钥不匹配".to_string(),
+        PkiError::UnsupportedKeyLabel | PkiError::InvalidPrivateKey | PkiError::InvalidPem => {
+            "客户端私钥格式无效（仅支持 PKCS#8 PEM）".to_string()
+        }
+        PkiError::CaNotCa
+        | PkiError::CaNotAuthorized
+        | PkiError::CaExpired
+        | PkiError::CaKeyMismatch => "CA 证书无效或与私钥不匹配".to_string(),
+        PkiError::CertificateExpired => "客户端证书已过期".to_string(),
+        PkiError::CertificateNotYetValid => "客户端证书尚未生效".to_string(),
+        PkiError::CertificateIssuerMismatch | PkiError::CertificateSignatureInvalid => {
+            "客户端证书不是由该 CA 签发".to_string()
+        }
+        PkiError::NotClientCertificate => "证书不是客户端证书".to_string(),
+        PkiError::NoPrincipal
+        | PkiError::MultiplePrincipals
+        | PkiError::MultiplePermissionSets
+        | PkiError::InvalidPermissions
+        | PkiError::InvalidPrincipal
+        | PkiError::InvalidHolder(_) => "客户端证书身份或权限字段无效".to_string(),
+        PkiError::InvalidCommonName
+        | PkiError::InvalidServerSan(_)
+        | PkiError::MissingServerSan
+        | PkiError::TooManyServerSans
+        | PkiError::InvalidValidity
+        | PkiError::InvalidCertificate
+        | PkiError::InvalidCsr
+        | PkiError::Crypto => "证书操作失败".to_string(),
+    }
+}
+
 async fn blocking<T, F>(task: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
@@ -136,6 +176,8 @@ pub struct TlsSettings {
     pub client_cert_path: String,
     pub client_key_path: String,
     pub domain: Option<String>,
+    #[serde(default)]
+    pub client_key_passphrase: Option<String>,
 }
 
 impl TlsSettings {
@@ -195,14 +237,20 @@ async fn connect(
             .map_err(|error| format!("读取 CA 证书失败: {error}"))?;
         let cert = std::fs::read(&tls.client_cert_path)
             .map_err(|error| format!("读取客户端证书失败: {error}"))?;
-        let key = Zeroizing::new(
-            std::fs::read(&tls.client_key_path)
-                .map_err(|error| format!("读取客户端私钥失败: {error}"))?,
+        let key_pem = Zeroizing::new(
+            std::fs::read_to_string(&tls.client_key_path)
+                .map_err(|error| format!("读取客户端私钥失败（需要 PEM）: {error}"))?,
         );
+        let key_passphrase = tls
+            .client_key_passphrase
+            .as_deref()
+            .filter(|value| !value.is_empty());
+        let key = signer_pki::load_private_key_pem(key_pem.as_str(), key_passphrase)
+            .map_err(pki_error)?;
 
         let mut config = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(ca))
-            .identity(Identity::from_pem(cert, key.as_slice()));
+            .identity(Identity::from_pem(cert, key.as_bytes()));
         if let Some(domain) = &tls.domain {
             config = config.domain_name(domain.trim());
         }
@@ -216,6 +264,144 @@ async fn connect(
         .await
         .map_err(|error| format!("failed to connect to signer: {error}"))?;
     Ok(SignerServiceClient::new(channel))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CsrView {
+    pub key_path: String,
+    pub csr_path: String,
+    pub principal: String,
+    pub holder_ids: Vec<String>,
+    pub permissions: String,
+    pub permissions_mask: String,
+    pub key_encrypted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClientCertificateView {
+    pub fingerprint_sha256: String,
+    pub principal: String,
+    pub holder_ids: Vec<String>,
+    pub permissions: String,
+    pub permissions_mask: String,
+    pub not_after_unix: i64,
+}
+
+impl From<ClientCertificateInfo> for ClientCertificateView {
+    fn from(info: ClientCertificateInfo) -> Self {
+        Self {
+            fingerprint_sha256: info.fingerprint_sha256,
+            principal: info.principal,
+            holder_ids: info.holder_ids,
+            permissions: info.permissions.names().join(","),
+            permissions_mask: info.permissions.uri_value(),
+            not_after_unix: info.not_after_unix,
+        }
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn tls_generate_client_csr(
+    principal: String,
+    holder_ids: Vec<String>,
+    permissions: String,
+    key_path: String,
+    csr_path: String,
+    passphrase: String,
+) -> Result<CsrView, String> {
+    let principal = principal.trim().to_string();
+    let passphrase = Zeroizing::new(passphrase);
+    let key_path = key_path.trim().to_string();
+    let csr_path = csr_path.trim().to_string();
+
+    if principal.is_empty() || key_path.is_empty() || csr_path.is_empty() {
+        return Err("请填写 principal、私钥路径和 CSR 路径".to_string());
+    }
+    if passphrase.is_empty() {
+        return Err("TLS 私钥口令不能为空".to_string());
+    }
+    if key_path == csr_path {
+        return Err("私钥和 CSR 必须使用不同路径".to_string());
+    }
+
+    let mut holder_ids: Vec<String> = holder_ids
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    holder_ids.sort();
+    holder_ids.dedup();
+
+    blocking(move || {
+        if Path::new(&key_path).exists() || Path::new(&csr_path).exists() {
+            return Err("目标文件已存在，请选择其他路径".to_string());
+        }
+        let permissions = PermissionSet::parse_list(&permissions)
+            .map_err(|error| format!("权限列表无效: {error}"))?;
+        let generated = signer_pki::generate_client_csr(
+            &principal,
+            &holder_ids,
+            permissions,
+            Some(passphrase.as_str()),
+            None,
+        )
+        .map_err(pki_error)?;
+
+        signer_holder::write_atomic(Path::new(&key_path), generated.key_pem.as_bytes(), false)
+            .map_err(holder_error)?;
+        signer_holder::write_atomic(Path::new(&csr_path), generated.csr_pem.as_bytes(), false)
+            .map_err(holder_error)?;
+
+        Ok(CsrView {
+            key_path,
+            csr_path,
+            principal,
+            holder_ids,
+            permissions: permissions.names().join(","),
+            permissions_mask: permissions.uri_value(),
+            key_encrypted: generated.key_encrypted,
+        })
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn tls_validate_client_cert(
+    ca_cert_path: String,
+    client_cert_path: String,
+    client_key_path: String,
+    passphrase: Option<String>,
+) -> Result<ClientCertificateView, String> {
+    if ca_cert_path.trim().is_empty()
+        || client_cert_path.trim().is_empty()
+        || client_key_path.trim().is_empty()
+    {
+        return Err("请选择 CA 证书、客户端证书和客户端私钥".to_string());
+    }
+    let passphrase = passphrase.map(Zeroizing::new);
+
+    blocking(move || {
+        let ca_pem = std::fs::read_to_string(&ca_cert_path)
+            .map_err(|error| format!("读取 CA 证书失败: {error}"))?;
+        let cert_pem = std::fs::read_to_string(&client_cert_path)
+            .map_err(|error| format!("读取客户端证书失败: {error}"))?;
+        let key_pem = Zeroizing::new(
+            std::fs::read_to_string(&client_key_path)
+                .map_err(|error| format!("读取客户端私钥失败: {error}"))?,
+        );
+        let info = signer_pki::verify_client_certificate(
+            &cert_pem,
+            &ca_pem,
+            key_pem.as_str(),
+            passphrase
+                .as_ref()
+                .map(|value| value.as_str())
+                .filter(|value| !value.is_empty()),
+        )
+        .map_err(pki_error)?;
+        Ok(ClientCertificateView::from(info))
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -519,6 +705,7 @@ mod tests {
             client_cert_path: "client.crt".to_string(),
             client_key_path: "client.key".to_string(),
             domain: None,
+            client_key_passphrase: None,
         };
         assert!(settings.validate().is_err());
 

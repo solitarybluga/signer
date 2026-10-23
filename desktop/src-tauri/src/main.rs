@@ -13,7 +13,9 @@ fn main() {
             commands::holder_export_public,
             commands::holder_import_share,
             commands::holder_vault_info,
-            commands::holder_submit_from_vault
+            commands::holder_submit_from_vault,
+            commands::tls_generate_client_csr,
+            commands::tls_validate_client_cert
         ])
         .run(tauri::generate_context!())
         .expect("error while running the signer desktop client");

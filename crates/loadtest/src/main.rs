@@ -52,6 +52,10 @@ struct Cli {
     #[arg(long, value_name = "NAME")]
     tls_domain: Option<String>,
 
+    /// Environment variable holding the passphrase for an encrypted client key.
+    #[arg(long, default_value = "SIGNER_TLS_KEY_PASSPHRASE")]
+    client_key_passphrase_env: String,
+
     /// Number of Ed25519 keys to create.
     #[arg(long, default_value_t = 1)]
     eddsa: u32,
@@ -175,10 +179,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Some(tls) = &tls {
         let ca = std::fs::read(&tls.ca_cert)?;
         let cert = std::fs::read(&tls.client_cert)?;
-        let key = Zeroizing::new(std::fs::read(&tls.client_key)?);
+        let key_pem = Zeroizing::new(
+            std::fs::read_to_string(&tls.client_key)
+                .map_err(|_| invalid("client key must be a PEM file"))?,
+        );
+        let key_passphrase = optional_passphrase_env(&cli.client_key_passphrase_env)?;
+        let key = signer_pki::load_private_key_pem(
+            key_pem.as_str(),
+            key_passphrase.as_ref().map(|value| value.as_str()),
+        )?;
         let mut config = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(ca))
-            .identity(Identity::from_pem(cert, key.as_slice()));
+            .identity(Identity::from_pem(cert, key.as_bytes()));
         if let Some(domain) = &tls.domain {
             config = config.domain_name(domain);
         }
@@ -402,6 +414,16 @@ fn percentile(sorted: &[u128], p: usize) -> u128 {
     }
     let index = (sorted.len() * p / 1000).min(sorted.len() - 1);
     sorted[index]
+}
+
+fn optional_passphrase_env(name: &str) -> Result<Option<Zeroizing<String>>, Box<dyn Error>> {
+    match std::env::var(name) {
+        Ok(value) if !value.is_empty() => Ok(Some(Zeroizing::new(value))),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(invalid(
+            "client key passphrase environment variable is not valid UTF-8",
+        )),
+    }
 }
 
 fn invalid(message: &'static str) -> Box<dyn Error> {

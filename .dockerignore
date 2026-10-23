@@ -9,6 +9,7 @@ data
 signer.toml
 CLAUDE.md
 *.key
+*.key.enc
 *.pem
 *.crt
 *.csr
