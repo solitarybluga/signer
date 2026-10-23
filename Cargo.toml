@@ -72,4 +72,5 @@ tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 uuid = { version = "1", features = ["v4"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+x509-parser = "0.18"
 zeroize = "1"

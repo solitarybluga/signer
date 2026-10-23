@@ -14,6 +14,25 @@ data_dir = "data"
 # Unseal session lifetime in seconds. Override with SIGNER_SESSION_TTL_SECS.
 session_ttl_secs = 600
 
+# mTLS (implemented; see docs/mtls.md).
+# Remove the leading '#' to enable. Omitting this section keeps plaintext
+# gRPC for local development; never expose plaintext to an untrusted network.
+# [tls]
+# cert_path = "data/tls/server.crt"
+# key_path = "data/tls/server.key"
+# client_ca_path = "data/tls/ca.crt"
+#
+# SAN URI namespaces. Client certificates carry:
+#   URI:signer://principal/<actor>       (exactly one)
+#   URI:signer://holder/<holder-id>      (zero or more)
+#   URI:signer://permissions/0x<16-hex>  (zero or one u64 permission mask)
+# principal_uri_prefix = "signer://principal/"
+# holder_uri_prefix = "signer://holder/"
+# permission_uri_prefix = "signer://permissions/"
+#
+# Environment equivalents (all three required together):
+#   SIGNER_TLS_CERT, SIGNER_TLS_KEY, SIGNER_TLS_CLIENT_CA
+
 [database]
 # Optional. When omitted, $data_dir/signer.db is used.
 # Override with SIGNER_DATABASE_URL.

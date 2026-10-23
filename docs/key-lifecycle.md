@@ -1,6 +1,6 @@
 # 密钥生命周期
 
-> 状态：部分实现。Ed25519 与 secp256k1 的 CreateKey / GetPublicKey / ListKeys / Sign、DEK/KEK 信封、SQLite/PostgreSQL 存储和 CreateKey/Sign 审计已实现；密钥创建后直接进入 `活跃` 状态。ImportKey（等待 mTLS）、Get/List 审计、unseal 审计、轮换与销毁仍待实现。
+> 状态：部分实现。Ed25519 与 secp256k1 的 CreateKey / GetPublicKey / ListKeys / Sign、DEK/KEK 信封、SQLite/PostgreSQL 存储、CreateKey/Sign 审计和 mTLS + 证书权限位已实现；密钥创建后直接进入 `活跃` 状态。ImportKey（mTLS 已就绪，接口待实现）、Get/List 审计、unseal 审计、轮换与销毁仍待实现。
 
 > 实现位置：`crates/core/src/keystore.rs`。
 

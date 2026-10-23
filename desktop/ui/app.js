@@ -6,6 +6,16 @@ const terminalStates = new Set(["unsealed", "failed", "expired"]);
 const holderFilters = [
   { name: "Signer files", extensions: ["key", "share", "vault", "json", "sig", "pub"] },
 ];
+const certFilters = [
+  { name: "Certificates", extensions: ["crt", "pem"] },
+  { name: "Private keys", extensions: ["key", "pem"] },
+];
+const tlsInputs = {
+  ca: "tls-ca",
+  cert: "tls-client-cert",
+  key: "tls-client-key",
+  domain: "tls-domain",
+};
 
 let currentSessionId = null;
 let pollHandle = null;
@@ -13,6 +23,50 @@ let busy = false;
 
 function serverUrl() {
   return byId("server").value.trim() || "http://127.0.0.1:50051";
+}
+
+function tlsSettings() {
+  const ca = valueOf("tls-ca");
+  const cert = valueOf("tls-client-cert");
+  const key = valueOf("tls-client-key");
+  if (!ca && !cert && !key) {
+    return null;
+  }
+  if (!ca || !cert || !key) {
+    appendLog("mTLS 需要同时选择 CA 证书、客户端证书和客户端私钥", "error");
+    return undefined;
+  }
+  return {
+    ca_cert_path: ca,
+    client_cert_path: cert,
+    client_key_path: key,
+    domain: valueOf("tls-domain") || null,
+  };
+}
+
+function loadTlsSettings() {
+  for (const [name, id] of Object.entries(tlsInputs)) {
+    try {
+      const value = localStorage.getItem(`signer.tls.${name}`);
+      if (value) {
+        byId(id).value = value;
+      }
+    } catch {
+      // localStorage is optional.
+    }
+  }
+}
+
+function rememberTlsSettings() {
+  for (const [name, id] of Object.entries(tlsInputs)) {
+    byId(id).addEventListener("input", () => {
+      try {
+        localStorage.setItem(`signer.tls.${name}`, valueOf(id));
+      } catch {
+        // localStorage is optional.
+      }
+    });
+  }
 }
 
 function valueOf(id) {
@@ -132,9 +186,15 @@ function startPolling() {
       return;
     }
     try {
+      const tls = tlsSettings();
+      if (tls === undefined) {
+        stopPolling();
+        return;
+      }
       const view = await invokeCommand("get_status", {
         server_url: serverUrl(),
         session_id: currentSessionId,
+        tls,
       });
       render(view);
     } catch (error) {
@@ -155,10 +215,15 @@ async function startUnseal() {
   if (busy) {
     return;
   }
+  const tls = tlsSettings();
+  if (tls === undefined) {
+    return;
+  }
   setBusy(true);
   try {
     const view = await invokeCommand("start_unseal", {
       server_url: serverUrl(),
+      tls,
     });
     render(view);
     appendLog(`会话已创建，阈值 ${view.threshold}`, "ok");
@@ -174,10 +239,15 @@ async function sealService() {
   if (busy) {
     return;
   }
+  const tls = tlsSettings();
+  if (tls === undefined) {
+    return;
+  }
   setBusy(true);
   try {
     const sealed = await invokeCommand("seal", {
       server_url: serverUrl(),
+      tls,
     });
     if (sealed) {
       stopPolling();
@@ -207,6 +277,7 @@ async function pickOpen(inputId, filters = holderFilters) {
     const selected = await dialog.open({ multiple: false, directory: false, filters });
     if (typeof selected === "string" && selected) {
       byId(inputId).value = selected;
+      byId(inputId).dispatchEvent(new Event("input", { bubbles: true }));
     }
   } catch (error) {
     appendLog(`选择文件失败：${error}`, "error");
@@ -221,6 +292,7 @@ async function pickSave(inputId, defaultPath, filters = holderFilters) {
     const selected = await dialog.save({ defaultPath, filters });
     if (typeof selected === "string" && selected) {
       byId(inputId).value = selected;
+      byId(inputId).dispatchEvent(new Event("input", { bubbles: true }));
     }
   } catch (error) {
     appendLog(`选择保存位置失败：${error}`, "error");
@@ -407,6 +479,11 @@ async function submitFromVault() {
     return;
   }
 
+  const tls = tlsSettings();
+  if (tls === undefined) {
+    return;
+  }
+
   setBusy(true);
   try {
     const view = await invokeCommand("holder_submit_from_vault", {
@@ -415,6 +492,7 @@ async function submitFromVault() {
       identity_path: identityPath,
       vault_path: vaultPath,
       passphrase,
+      tls,
     });
     render(view);
     appendLog(`份额已提交：${sessionId}`, "ok");
@@ -585,6 +663,17 @@ byId("pick-submit-identity").addEventListener("click", () =>
 byId("pick-submit-vault").addEventListener("click", () =>
   pickOpen("submit-vault-path", [{ name: "Share vault", extensions: ["vault"] }]),
 );
+
+byId("pick-tls-ca").addEventListener("click", () => pickOpen("tls-ca", certFilters));
+byId("pick-tls-client-cert").addEventListener("click", () =>
+  pickOpen("tls-client-cert", certFilters),
+);
+byId("pick-tls-client-key").addEventListener("click", () =>
+  pickOpen("tls-client-key", certFilters),
+);
+
+loadTlsSettings();
+rememberTlsSettings();
 
 byId("copy-session").addEventListener("click", async () => {
   if (!currentSessionId) {

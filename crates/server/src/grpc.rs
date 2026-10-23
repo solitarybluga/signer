@@ -15,6 +15,9 @@ use signer_core::storage::{
 use signer_core::unseal::{SessionState, ShareSubmission, UnsealError, UnsealManager};
 use signer_proto::pb;
 
+use crate::permissions::Permission;
+use crate::tls::Principal;
+
 use pb::{
     CreateKeyRequest, CreateKeyResponse, GetPublicKeyRequest, GetPublicKeyResponse,
     GetUnsealStatusRequest, GetUnsealStatusResponse, ImportKeyRequest, ImportKeyResponse,
@@ -30,6 +33,7 @@ const GRPC_ACTOR: &str = "grpc";
 pub struct SignerGrpc {
     unseal: Arc<UnsealManager>,
     keystore: Arc<Keystore>,
+    require_permissions: bool,
 }
 
 impl SignerGrpc {
@@ -39,11 +43,60 @@ impl SignerGrpc {
         sign_audit: bool,
     ) -> Self {
         let keystore = Arc::new(Keystore::new(store, unseal.clone()).with_sign_audit(sign_audit));
-        Self { unseal, keystore }
+        Self {
+            unseal,
+            keystore,
+            require_permissions: false,
+        }
+    }
+
+    /// Require a client-certificate principal and per-RPC permission bits.
+    /// Enabled by `main` whenever `[tls]` is configured; direct in-process tests
+    /// keep the permissive default.
+    pub fn with_client_permissions(mut self, enabled: bool) -> Self {
+        self.require_permissions = enabled;
+        self
     }
 
     pub fn into_server(self) -> SignerServiceServer<Self> {
         SignerServiceServer::new(self)
+    }
+
+    fn principal<T>(&self, request: &Request<T>) -> Result<Option<Principal>, Status> {
+        if !self.require_permissions {
+            return Ok(None);
+        }
+        request
+            .extensions()
+            .get::<Principal>()
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| Status::unauthenticated("client identity is missing"))
+    }
+
+    fn authorize<T>(
+        &self,
+        request: &Request<T>,
+        permission: Permission,
+    ) -> Result<Option<Principal>, Status> {
+        let principal = self.principal(request)?;
+        if let Some(principal) = &principal
+            && !principal.permissions.contains(permission)
+        {
+            debug!(
+                permission = permission.as_str(),
+                actor = %principal.actor,
+                "authorization denied"
+            );
+            return Err(Status::permission_denied("permission denied"));
+        }
+        Ok(principal)
+    }
+
+    fn actor(principal: Option<&Principal>) -> &str {
+        principal
+            .map(|principal| principal.actor.as_str())
+            .unwrap_or(GRPC_ACTOR)
     }
 }
 
@@ -53,6 +106,8 @@ impl SignerService for SignerGrpc {
         &self,
         request: Request<CreateKeyRequest>,
     ) -> Result<Response<CreateKeyResponse>, Status> {
+        let principal = self.authorize(&request, Permission::KeyCreate)?;
+        let actor = Self::actor(principal.as_ref()).to_string();
         let request = request.into_inner();
         let curve = parse_curve(request.curve)?;
         let algorithm = parse_algorithm(request.algorithm)?;
@@ -65,7 +120,7 @@ impl SignerService for SignerGrpc {
 
         let key = self
             .keystore
-            .create_key(curve, algorithm, labels, GRPC_ACTOR)
+            .create_key(curve, algorithm, labels, &actor)
             .await
             .map_err(|error| {
                 warn!("CreateKey failed");
@@ -80,17 +135,17 @@ impl SignerService for SignerGrpc {
 
     async fn import_key(
         &self,
-        _request: Request<ImportKeyRequest>,
+        request: Request<ImportKeyRequest>,
     ) -> Result<Response<ImportKeyResponse>, Status> {
-        Err(Status::unimplemented(
-            "ImportKey requires mTLS and is not wired yet",
-        ))
+        let _principal = self.authorize(&request, Permission::KeyImport)?;
+        Err(Status::unimplemented("ImportKey is not implemented yet"))
     }
 
     async fn get_public_key(
         &self,
         request: Request<GetPublicKeyRequest>,
     ) -> Result<Response<GetPublicKeyResponse>, Status> {
+        let _principal = self.authorize(&request, Permission::KeyRead)?;
         let request = request.into_inner();
         let key_id = parse_key_id(&request.key_id)?;
         debug!(key_id = %key_id, "GetPublicKey requested");
@@ -115,6 +170,7 @@ impl SignerService for SignerGrpc {
         &self,
         request: Request<ListKeysRequest>,
     ) -> Result<Response<ListKeysResponse>, Status> {
+        let _principal = self.authorize(&request, Permission::KeyRead)?;
         let request = request.into_inner();
         let limit = match request.page_size {
             0 => 50,
@@ -157,6 +213,8 @@ impl SignerService for SignerGrpc {
     }
 
     async fn sign(&self, request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
+        let principal = self.authorize(&request, Permission::KeySign)?;
+        let actor = Self::actor(principal.as_ref()).to_string();
         let request = request.into_inner();
         let key_id = parse_key_id(&request.key_id)?;
         info!(
@@ -166,12 +224,7 @@ impl SignerService for SignerGrpc {
         );
         let signature = self
             .keystore
-            .sign(
-                key_id,
-                &request.payload,
-                GRPC_ACTOR,
-                Some(&request.request_id),
-            )
+            .sign(key_id, &request.payload, &actor, Some(&request.request_id))
             .await
             .map_err(|error| {
                 warn!(key_id = %key_id, "Sign failed");
@@ -188,8 +241,9 @@ impl SignerService for SignerGrpc {
 
     async fn start_unseal(
         &self,
-        _request: Request<StartUnsealRequest>,
+        request: Request<StartUnsealRequest>,
     ) -> Result<Response<StartUnsealResponse>, Status> {
+        let _principal = self.authorize(&request, Permission::UnsealStart)?;
         let session = self.unseal.start_session().map_err(map_unseal_error)?;
         info!(
             session_id = %session.id,
@@ -211,10 +265,21 @@ impl SignerService for SignerGrpc {
         &self,
         request: Request<SubmitUnsealShareRequest>,
     ) -> Result<Response<SubmitUnsealShareResponse>, Status> {
+        let principal = self.authorize(&request, Permission::UnsealSubmit)?;
         let request = request.into_inner();
 
         if request.share_holder_id.is_empty() {
             return Err(Status::invalid_argument("share_holder_id is required"));
+        }
+        if let Some(principal) = &principal
+            && !principal
+                .holder_ids
+                .iter()
+                .any(|id| id == &request.share_holder_id)
+        {
+            return Err(Status::permission_denied(
+                "holder is not bound to this certificate",
+            ));
         }
         if request.encrypted_share.is_empty() {
             return Err(Status::invalid_argument("encrypted_share is required"));
@@ -280,6 +345,7 @@ impl SignerService for SignerGrpc {
         &self,
         request: Request<GetUnsealStatusRequest>,
     ) -> Result<Response<GetUnsealStatusResponse>, Status> {
+        let _principal = self.authorize(&request, Permission::UnsealStatus)?;
         let session_id = parse_session_id(&request.into_inner().session_id)?;
         debug!(session_id = %session_id, "GetUnsealStatus requested");
         let status = self.unseal.status(session_id).map_err(map_unseal_error)?;
@@ -295,7 +361,8 @@ impl SignerService for SignerGrpc {
         }))
     }
 
-    async fn seal(&self, _request: Request<SealRequest>) -> Result<Response<SealResponse>, Status> {
+    async fn seal(&self, request: Request<SealRequest>) -> Result<Response<SealResponse>, Status> {
+        let _principal = self.authorize(&request, Permission::UnsealSeal)?;
         self.unseal.seal();
         info!("service sealed; KEK and unseal sessions cleared");
         Ok(Response::new(SealResponse { sealed: true }))
@@ -444,6 +511,11 @@ fn map_unseal_error(error: UnsealError) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permissions::{
+        KEY_CREATE, KEY_IMPORT, KEY_READ, KEY_SIGN, PermissionSet, UNSEAL_SEAL, UNSEAL_START,
+        UNSEAL_STATUS, UNSEAL_SUBMIT,
+    };
+    use crate::tls::Principal;
     use ed25519_dalek::{
         Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey,
     };
@@ -475,6 +547,16 @@ mod tests {
     }
 
     async fn setup() -> (SignerGrpc, Vec<Zeroizing<Vec<u8>>>, Vec<TestHolder>) {
+        let (service, shares, holders, _) = setup_with_store().await;
+        (service, shares, holders)
+    }
+
+    async fn setup_with_store() -> (
+        SignerGrpc,
+        Vec<Zeroizing<Vec<u8>>>,
+        Vec<TestHolder>,
+        Arc<SqliteStore>,
+    ) {
         let test_holders: Vec<TestHolder> = (1..=3).map(TestHolder::new).collect();
         let holders: Vec<HolderIndex> = test_holders
             .iter()
@@ -488,10 +570,26 @@ mod tests {
             UnsealManager::bootstrap(UnsealConfig::new(2, 3), holders).unwrap();
         let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
         (
-            SignerGrpc::with_sign_audit(Arc::new(manager), store, true),
+            SignerGrpc::with_sign_audit(Arc::new(manager), store.clone(), true),
             shares,
             test_holders,
+            store,
         )
+    }
+
+    fn test_principal(actor: &str, mask: u64, holders: &[&str]) -> Principal {
+        Principal {
+            actor: actor.to_string(),
+            holder_ids: holders.iter().map(|holder| holder.to_string()).collect(),
+            permissions: PermissionSet::from_known_mask(mask).unwrap(),
+            fingerprint: [7u8; 32],
+        }
+    }
+
+    fn with_principal<T>(message: T, principal: Principal) -> Request<T> {
+        let mut request = Request::new(message);
+        request.extensions_mut().insert(principal);
+        request
     }
 
     fn submission_request(
@@ -830,5 +928,258 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn permissions_are_required_for_every_rpc() {
+        let (service, _, _) = setup().await;
+        let service = service.with_client_permissions(true);
+        let none = test_principal("none", 0, &[]);
+
+        let error = service
+            .start_unseal(with_principal(StartUnsealRequest {}, none.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        let error = service
+            .submit_unseal_share(with_principal(
+                SubmitUnsealShareRequest::default(),
+                none.clone(),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        let error = service
+            .get_unseal_status(with_principal(
+                GetUnsealStatusRequest::default(),
+                none.clone(),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        let error = service
+            .seal(with_principal(SealRequest {}, none.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        let error = service
+            .create_key(with_principal(CreateKeyRequest::default(), none.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        let error = service
+            .import_key(with_principal(ImportKeyRequest::default(), none.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        let error = service
+            .get_public_key(with_principal(GetPublicKeyRequest::default(), none.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        let error = service
+            .list_keys(with_principal(ListKeysRequest::default(), none.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        let error = service
+            .sign(with_principal(SignRequest::default(), none))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn permission_bits_are_independent_and_holder_bound() {
+        let (service, _, _) = setup().await;
+        let service = service.with_client_permissions(true);
+
+        let starter = test_principal("starter", UNSEAL_START | UNSEAL_STATUS, &[]);
+        service
+            .start_unseal(with_principal(StartUnsealRequest {}, starter.clone()))
+            .await
+            .unwrap();
+        let error = service
+            .create_key(with_principal(CreateKeyRequest::default(), starter.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        let error = service
+            .get_unseal_status(with_principal(
+                GetUnsealStatusRequest {
+                    session_id: "not-a-uuid".to_string(),
+                },
+                starter,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+        let reader = test_principal("reader", KEY_READ, &[]);
+        service
+            .list_keys(with_principal(ListKeysRequest::default(), reader.clone()))
+            .await
+            .unwrap();
+        let error = service
+            .sign(with_principal(SignRequest::default(), reader))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        let signer = test_principal("signer", KEY_SIGN, &[]);
+        let error = service
+            .sign(with_principal(
+                SignRequest {
+                    key_id: Uuid::new_v4().to_string(),
+                    payload: vec![1; 32],
+                    request_id: String::new(),
+                },
+                signer,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
+
+        let creator = test_principal("creator", KEY_CREATE, &[]);
+        let error = service
+            .create_key(with_principal(
+                CreateKeyRequest {
+                    curve: pb::Curve::Edwards25519 as i32,
+                    algorithm: pb::SignatureAlgorithm::Eddsa as i32,
+                    labels: Default::default(),
+                },
+                creator,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+        let importer = test_principal("importer", KEY_IMPORT, &[]);
+        let error = service
+            .import_key(with_principal(ImportKeyRequest::default(), importer))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unimplemented);
+
+        let submitter = test_principal("submitter", UNSEAL_SUBMIT, &["holder-1"]);
+        let request = SubmitUnsealShareRequest {
+            session_id: "not-a-uuid".to_string(),
+            share_holder_id: "holder-2".to_string(),
+            encrypted_share: vec![1],
+            signature: vec![0; 64],
+            share_index: 1,
+            nonce: vec![0; 32],
+        };
+        let error = service
+            .submit_unseal_share(with_principal(request, submitter.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        let request = SubmitUnsealShareRequest {
+            session_id: "not-a-uuid".to_string(),
+            share_holder_id: "holder-1".to_string(),
+            encrypted_share: vec![1],
+            signature: vec![0; 64],
+            share_index: 1,
+            nonce: vec![0; 32],
+        };
+        let error = service
+            .submit_unseal_share(with_principal(request, submitter))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+        let sealer = test_principal("sealer", UNSEAL_SEAL, &[]);
+        service
+            .seal(with_principal(SealRequest {}, sealer))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_principal_is_unauthenticated() {
+        let (service, _, _) = setup().await;
+        let service = service.with_client_permissions(true);
+
+        let error = service
+            .start_unseal(Request::new(StartUnsealRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn audit_uses_certificate_principal_actor() {
+        let (service, shares, holders, store) = setup_with_store().await;
+        let service = service.with_client_permissions(true);
+
+        let starter = test_principal("unseal-operator", UNSEAL_START | UNSEAL_STATUS, &[]);
+        let start = service
+            .start_unseal(with_principal(StartUnsealRequest {}, starter))
+            .await
+            .unwrap()
+            .into_inner();
+
+        for index in 0..2 {
+            let holder = &holders[index];
+            let request = submission_request(&start, holder, &shares[index]);
+            let holder_id = holder.id.as_str();
+            let principal = test_principal(holder_id, UNSEAL_SUBMIT, &[holder_id]);
+            service
+                .submit_unseal_share(with_principal(request, principal))
+                .await
+                .unwrap();
+        }
+
+        let creator = test_principal("alice-creator", KEY_CREATE, &[]);
+        let created = service
+            .create_key(with_principal(
+                CreateKeyRequest {
+                    curve: pb::Curve::Edwards25519 as i32,
+                    algorithm: pb::SignatureAlgorithm::Eddsa as i32,
+                    labels: Default::default(),
+                },
+                creator,
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        let key = created.key.expect("CreateKey returns a key");
+
+        let signer = test_principal("alice-signer", KEY_SIGN, &[]);
+        service
+            .sign(with_principal(
+                SignRequest {
+                    key_id: key.id,
+                    payload: b"payload".to_vec(),
+                    request_id: "req-audit".to_string(),
+                },
+                signer,
+            ))
+            .await
+            .unwrap();
+
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT actor, action FROM audit_log ORDER BY id")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert!(
+            rows.iter()
+                .any(|(actor, action)| actor == "alice-creator" && action == "CreateKey")
+        );
+        assert!(
+            rows.iter()
+                .any(|(actor, action)| actor == "alice-signer" && action == "Sign")
+        );
     }
 }

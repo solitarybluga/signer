@@ -16,8 +16,8 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 
 | 里程碑 | 范围 | 状态 |
 | --- | --- | --- |
-| v0.1 | 单签 + VSS 门限解封 | 🚧 进行中（VSS 解封已实现） |
-| v0.2 | 份额轮换、mTLS、监控指标 | ☐ 计划中 |
+| v0.1 | 单签 + VSS 门限解封 + mTLS | 🚧 进行中（VSS 解封与 mTLS 已实现） |
+| v0.2 | 份额轮换、监控指标 | ☐ 计划中 |
 | v0.3 | 门限签名（FROST / CGGMP21） | ☐ 计划中 |
 
 ## 当前进度
@@ -31,7 +31,8 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 | gRPC 解封接口（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal） | ✅ 已实现 |
 | 桌面端 Holder 身份、份额 vault 与解封提交（Tauri） | ✅ 已实现 |
 | 加密 keystore（DEK/KEK 信封） | ✅ Ed25519 与 secp256k1 已实现 |
-| 份额提交加密与持有者签名 | ✅ 已实现（每会话 X25519 + Ed25519；gRPC 仍无 TLS） |
+| 份额提交加密与持有者签名 | ✅ 已实现（每会话 X25519 + Ed25519） |
+| gRPC mTLS + 客户端证书权限位 | ✅ 已实现（服务端、loadtest、桌面端；见 [docs/mtls.md](docs/mtls.md)） |
 | 密钥管理接口与签名 | ✅ EdDSA/ECDSA 的 CreateKey/GetPublicKey/ListKeys/Sign 已实现；ImportKey 未实现 |
 
 ## v0.1 目标特性
@@ -45,6 +46,7 @@ v0.1 的目标是**门限密钥托管 / 门限解封**，不是门限签名。�
 - 安全提交：会话 nonce 绑定、份额加密到每会话临时 X25519 公钥、持有者 Ed25519 签名，服务端验签/解密/VSS 后才计数
 - 签名：secp256k1 + ECDSA（EVM）与 edwards25519 + EdDSA（Solana）
 - gRPC 接口（tonic）：解封接口与 EdDSA 密钥管理/签名
+- mTLS + 客户端证书权限位：证书携带 principal/holder 和 u64 方法权限位；新增客户端或改权限不重启 signer
 - 所有密钥操作写入审计日志
 - 存储层抽象：SQLite（单机）/ PostgreSQL（集群）共用同一套 trait
 
@@ -95,7 +97,9 @@ VSS 解封使用 `kek_check.json` v3（包含 holder Ed25519 注册表）、mani
 
 服务端不再自动生成 KEK；缺少 `data/kek_check.json` 会报错并提示先执行 `signer-admin init`。生成的 `data/shares/*.share` 必须交给对应持有者，`data/` 不能提交到仓库。
 
-服务端默认读取工作目录下的 `signer.toml`；可用 `--config <path>` 或 `SIGNER_CONFIG` 指定其他路径。配置示例见 [`signer.example.toml`](signer.example.toml)，实际 `signer.toml` 已被 gitignore。环境变量 `SIGNER_GRPC_ADDR`、`SIGNER_DATA_DIR`、`SIGNER_SESSION_TTL_SECS`、`SIGNER_DATABASE_URL` 会覆盖配置文件中的对应值。未配置 `database.url` 时，默认使用 `$data_dir/signer.db`（SQLite）；`postgres://...` 则使用 PostgreSQL。连接池参数（`max_connections`、`min_connections`、`acquire_timeout_secs`、`idle_timeout_secs`、`max_lifetime_secs`）也在 `[database]` 中配置。
+服务端默认读取工作目录下的 `signer.toml`；可用 `--config <path>` 或 `SIGNER_CONFIG` 指定其他路径。配置示例见 [`signer.example.toml`](signer.example.toml)，实际 `signer.toml` 已被 gitignore。环境变量 `SIGNER_GRPC_ADDR`、`SIGNER_DATA_DIR`、`SIGNER_SESSION_TTL_SECS`、`SIGNER_DATABASE_URL` 会覆盖配置文件中的对应值；mTLS 证书可用 `SIGNER_TLS_CERT`、`SIGNER_TLS_KEY`、`SIGNER_TLS_CLIENT_CA` 覆盖，三项必须同时存在。未配置 `database.url` 时，默认使用 `$data_dir/signer.db`（SQLite）；`postgres://...` 则使用 PostgreSQL。连接池参数（`max_connections`、`min_connections`、`acquire_timeout_secs`、`idle_timeout_secs`、`max_lifetime_secs`）也在 `[database]` 中配置。
+
+mTLS 与客户端证书权限位已实现：配置、证书 SAN URI 格式、u64 权限位和运维边界见 [docs/mtls.md](docs/mtls.md) 与 [ADR-0008](docs/adr/0008-mtls-client-cert-permissions.md)。未配置 `[tls]` 时 gRPC 仍是明文，只能在本机或可信网络使用。
 
 日志使用 `tracing`，默认 `info` 级别并输出源码文件和行号；可在 `signer.toml` 的 `[logging]` 中设置 `level` / `format` / `location`，或用 `RUST_LOG` 覆盖级别，例如 `RUST_LOG=signer_server=debug,sqlx=warn`。`[audit].sign_enabled` 控制是否记录每次 Sign 审计，默认 `true`；生产环境不应关闭。
 
@@ -129,7 +133,7 @@ cd desktop/src-tauri
 cargo run
 ```
 
-默认连接 `http://127.0.0.1:50051`。界面顶部可在「操作员」和「份额持有者」之间切换；持有者 tab 内再分「密钥分发」和「Unseal」：前者生成身份、导出公开信息、导入并验证 `.share`、把份额加密保存为本地 vault，后者用身份文件 + vault 解锁，把份额加密到会话临时公钥并用 Ed25519 签名后提交。manifest 三项（`manifest.json`、`manifest.sig`、`operator.pub`）可选；不提供时按 legacy 方式导入并显示未验签警告。gRPC 尚无 TLS/服务端认证，仅限本机或可信网络使用。
+默认连接 `http://127.0.0.1:50051`。界面顶部可在「操作员」和「份额持有者」之间切换；持有者 tab 内再分「密钥分发」和「Unseal」：前者生成身份、导出公开信息、导入并验证 `.share`、把份额加密保存为本地 vault，后者用身份文件 + vault 解锁，把份额加密到会话临时公钥并用 Ed25519 签名后提交。manifest 三项（`manifest.json`、`manifest.sig`、`operator.pub`）可选；不提供时按 legacy 方式导入并显示未验签警告。顶部「mTLS 证书」可配置 CA、客户端证书和客户端私钥；未配置时使用明文，仅限本机或可信网络。
 
 ### 压测
 

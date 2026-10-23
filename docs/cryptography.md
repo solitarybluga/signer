@@ -53,7 +53,7 @@ KEK（32 字节随机密钥）
 | FROST | 门限 Ed25519 签名 | 🚧 | v0.3 |
 | CGGMP21 | 门限 ECDSA 签名 | 🚧 | v0.3 |
 | Pedersen VSS | 信息论隐藏的 VSS 备选 | 🔍 | 未采用 |
-| TLS / mTLS | 传输加密与服务端/客户端认证 | 🚧 | 尚未接入 |
+| TLS / mTLS | 传输加密与服务端/客户端认证 | ✅ | 已实现，默认关闭 |
 | KMS / HSM | 托管 KEK | 🔍 | ADR-0005 明确 v0.1 不采用 |
 
 ## 1. CSPRNG 与秘密生命周期
@@ -250,7 +250,7 @@ v1 信封本身没有发送方认证，所以 operator 用 manifest 签名绑定
 ### 注意
 
 - X25519 不认证对方；v1 依赖 manifest，v2 依赖 Holder Ed25519 签名。
-- 当前没有 TLS，持有者无法认证服务端；中间人仍可能替换 `session_public_key`。这是 T12 残余风险，接入 mTLS 后才能消除。
+- 未启用 `[tls]` 时没有 TLS，持有者无法认证服务端；中间人仍可能替换 `session_public_key`。这是 T12 残余风险；启用 mTLS 后可以认证服务端，生产环境必须启用。
 
 ## 5. HKDF-SHA256
 
@@ -684,27 +684,42 @@ g(x) =     b_1·x + ... + b_{t-1}·x^{t-1}
 
 当前 VSS 只需要一致性和完整性，不需要信息论隐藏；Feldman 的 `C_0 = s·G` 在离散对数假设下可接受。选择 Feldman 可以保持份额 33 字节、承诺数量等于 threshold，并减少实现复杂度。
 
-## 18. TLS / mTLS（🚧 计划）
+## 18. TLS / mTLS（✅ 已实现，需显式启用）
 
 ### 原理
 
-TLS 提供传输加密和服务端身份认证；mTLS 额外要求客户端出示 X.509 证书，服务端验证客户端身份。典型部署使用私有 CA：
+TLS 提供传输加密和服务端身份认证；mTLS 额外要求客户端出示 X.509 证书，服务端验证客户端身份。目标部署使用标准 CA：
 
 - signer 服务端证书：`serverAuth`；
 - Holder/operator 客户端证书：`clientAuth`；
-- 双方验证证书链、有效期、SAN、EKU 和吊销状态。
+- 双方验证证书链、有效期、SAN、EKU；本版不做 CRL/OCSP。
 
-### 计划中的使用
+### 客户端证书权限位
+
+服务端不读取本地策略文件，也不维护客户端白名单。客户端证书通过 SAN URI 携带：
+
+```text
+URI:signer://principal/<actor>
+URI:signer://holder/<holder-id>        (零个或多个)
+URI:signer://permissions/0x<16-hex>    (u64 权限位掩码，最多一个)
+```
+
+权限位使用 u64，bit 0–7 对应 `unseal.start/submit/status/seal`、`key.create/import/read/sign`；bit 8/9 预留给未来的 `key.destroy`/`audit.read`，在对应 RPC 实现前也必须为 0；bit 10–63 保留。**保留位为 1 的证书必须被拒绝**（包括 bit 8/9、bit 63、全 1 mask），不能忽略或当通配符；mask 0 表示无权限，不表示全部权限。位号只追加、不重排、不复用。
+
+每个 RPC 在产生副作用前检查固定权限；`CreateKey`/`Sign` 审计 actor 来自证书 principal。CA 是授权根：CA 必须在签发时强制限制权限位，否则客户端可自行申请 `unseal.seal`/`key.sign`。详见 [mtls.md](mtls.md) 和 [ADR-0008](adr/0008-mtls-client-cert-permissions.md)。
+
+### 目标行为
 
 - 消除“中间人替换 `session_public_key`”的 T12 风险；
-- 服务端从客户端证书提取 Holder 身份，与提交中的 `holder_id` 做绑定；
-- 保留应用层 Ed25519 签名和每会话 X25519 加密，作为端到端防线。
+- 服务端从客户端证书提取 principal 和 holder 集合，与 `SubmitUnsealShare` 的 `holder_id` 做绑定；
+- 保留应用层 Ed25519 签名、会话 nonce 和每会话 X25519 加密，作为端到端防线；
+- 新增客户端或调整权限只重签证书，不重启 signer；服务端证书/CA bundle 轮换仍需重启。
 
 ### 注意
 
-- mTLS 不能替代授权：证书只证明“是谁”，仍需检查 Holder 是否注册、是否有权提交。
-- 如果 TLS 在反向代理终止，代理可以看到明文并能改写响应；要保证端到端安全，应使用 TLS passthrough，或在代理到 signer 之间再加一段 mTLS。
-- 当前 gRPC 仍是明文，只能在本机或可信网络使用。
+- mTLS 不能替代授权：证书只证明“是谁”，权限位必须由 CA 签发策略保证；Holder 注册和 Ed25519 份额签名仍然必须校验。
+- 如果 TLS 在反向代理终止，代理可以看到明文并能改写响应，客户端证书身份也会丢失；要保证端到端安全，应使用 TLS passthrough，或在代理到 signer 之间再加一段 mTLS。
+- mTLS 已实现，但默认关闭；未配置 `[tls]` 时 gRPC 仍是明文，只能在本机或可信网络使用。生产环境必须启用。
 
 ## 19. KMS / HSM（🔍 评估未采用）
 
@@ -723,6 +738,7 @@ ADR-0005 明确 v0.1 不用 KMS 托管 KEK，以保持门限信任模型：如�
 | `argon2` 0.5 | Argon2id 口令 KDF | ✅ |
 | `rand` 0.8 | `OsRng` 随机数 | ✅ |
 | `zeroize` 1 | 秘密内存擦除 | ✅ |
+| `x509-parser` 0.18 | 解析客户端证书 SAN URI（mTLS 权限位） | ✅ |
 | `sharks` | 旧 GF(256) Shamir | 🕘 已移除 |
 | `vsss-rs` | 现成 VSS 实现 | 🔍 未采用：依赖 curve25519-dalek 5 的 `ff`/`group` trait，会与现有 4.x 依赖栈重复 |
 
@@ -732,7 +748,7 @@ ADR-0005 明确 v0.1 不用 KMS 托管 KEK，以保持门限信任模型：如�
 
 ## 21. 安全边界与已知限制
 
-- **没有 TLS**：gRPC 明文，服务端身份未认证；中间人可替换会话公钥。仅限本机或可信网络。
+- **mTLS 默认关闭**：已实现，但未配置 `[tls]` 时 gRPC 仍是明文，服务端身份未认证；中间人可替换会话公钥。生产环境必须启用，见第 18 节。
 - **可信 dealer**：`signer-admin init` 在初始化时能看到全部明文份额；它必须被信任不会保留份额。
 - **Feldman 的 C0 公开**：KEK 的群元素公开，隐藏性依赖离散对数假设。
 - **自研 VSS**：`crates/vss` 未经独立审计；需要测试向量、外部评审和侧信道评估。

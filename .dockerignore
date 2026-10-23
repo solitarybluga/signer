@@ -9,8 +9,13 @@ data
 signer.toml
 CLAUDE.md
 *.key
+*.pem
+*.crt
+*.csr
+*.der
 *.share
 *.vault
 *.db
 *.db-shm
 *.db-wal
+crates/server/tests/fixtures

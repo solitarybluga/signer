@@ -14,7 +14,7 @@ use signer_holder::HolderIdentity;
 use signer_proto::pb;
 use signer_proto::pb::signer_service_client::SignerServiceClient;
 use tokio::task::JoinSet;
-use tonic::transport::Channel;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -35,6 +35,22 @@ struct Cli {
     /// Skip unsealing; the server must already be unsealed.
     #[arg(long)]
     skip_unseal: bool,
+
+    /// Client CA bundle for mTLS. Must be used with --client-cert and --client-key.
+    #[arg(long, value_name = "PATH")]
+    ca_cert: Option<PathBuf>,
+
+    /// Client certificate for mTLS.
+    #[arg(long, value_name = "PATH")]
+    client_cert: Option<PathBuf>,
+
+    /// Client private key for mTLS.
+    #[arg(long, value_name = "PATH")]
+    client_key: Option<PathBuf>,
+
+    /// TLS server name override (useful when connecting by IP).
+    #[arg(long, value_name = "NAME")]
+    tls_domain: Option<String>,
 
     /// Number of Ed25519 keys to create.
     #[arg(long, default_value_t = 1)]
@@ -74,6 +90,53 @@ impl HolderPaths {
     }
 }
 
+struct TlsFiles {
+    ca_cert: PathBuf,
+    client_cert: PathBuf,
+    client_key: PathBuf,
+    domain: Option<String>,
+}
+
+fn tls_files(cli: &Cli) -> Result<Option<TlsFiles>, Box<dyn Error>> {
+    match (&cli.ca_cert, &cli.client_cert, &cli.client_key) {
+        (None, None, None) => {
+            if cli.tls_domain.is_some() {
+                return Err(invalid(
+                    "--tls-domain requires --ca-cert, --client-cert and --client-key",
+                ));
+            }
+            Ok(None)
+        }
+        (Some(ca_cert), Some(client_cert), Some(client_key)) => Ok(Some(TlsFiles {
+            ca_cert: ca_cert.clone(),
+            client_cert: client_cert.clone(),
+            client_key: client_key.clone(),
+            domain: cli.tls_domain.clone(),
+        })),
+        _ => Err(invalid(
+            "--ca-cert, --client-cert and --client-key must be provided together",
+        )),
+    }
+}
+
+fn target_url(server: &str, tls_enabled: bool) -> Result<String, Box<dyn Error>> {
+    let (scheme, _) = match server.split_once("://") {
+        Some(parts) => (Some(parts.0), parts.1),
+        None => (None, server),
+    };
+
+    match (scheme, tls_enabled) {
+        (Some("http"), false) | (Some("https"), true) => Ok(server.to_string()),
+        (Some("http"), true) => Err(invalid("mTLS requires an https:// server URL")),
+        (Some("https"), false) => Err(invalid(
+            "https:// requires --ca-cert, --client-cert and --client-key",
+        )),
+        (None, true) => Ok(format!("https://{server}")),
+        (None, false) => Ok(format!("http://{server}")),
+        (Some(_), _) => Err(invalid("server URL must use http:// or https://")),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
@@ -106,12 +169,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ))
     };
 
-    let target = if cli.server.contains("://") {
-        cli.server.clone()
-    } else {
-        format!("http://{}", cli.server)
-    };
-    let mut client = SignerServiceClient::connect(target).await?;
+    let tls = tls_files(&cli)?;
+    let target = target_url(&cli.server, tls.is_some())?;
+    let mut endpoint = Endpoint::from_shared(target)?;
+    if let Some(tls) = &tls {
+        let ca = std::fs::read(&tls.ca_cert)?;
+        let cert = std::fs::read(&tls.client_cert)?;
+        let key = Zeroizing::new(std::fs::read(&tls.client_key)?);
+        let mut config = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(ca))
+            .identity(Identity::from_pem(cert, key.as_slice()));
+        if let Some(domain) = &tls.domain {
+            config = config.domain_name(domain);
+        }
+        endpoint = endpoint.tls_config(config)?;
+    }
+    let mut client = SignerServiceClient::new(endpoint.connect().await?);
 
     if let Some(passphrase) = passphrase {
         if holders.is_empty() {
@@ -353,5 +426,24 @@ mod tests {
         assert_eq!(percentile(&values, 0), 1);
         assert_eq!(percentile(&values, 999), 5);
         assert_eq!(percentile(&[], 50), 0);
+    }
+
+    #[test]
+    fn target_url_requires_matching_tls_settings() {
+        assert_eq!(
+            target_url("127.0.0.1:50051", false).unwrap(),
+            "http://127.0.0.1:50051"
+        );
+        assert_eq!(
+            target_url("127.0.0.1:50051", true).unwrap(),
+            "https://127.0.0.1:50051"
+        );
+        assert_eq!(
+            target_url("https://signer.test:50051", true).unwrap(),
+            "https://signer.test:50051"
+        );
+        assert!(target_url("http://127.0.0.1:50051", true).is_err());
+        assert!(target_url("https://signer.test:50051", false).is_err());
+        assert!(target_url("grpc://127.0.0.1:50051", false).is_err());
     }
 }

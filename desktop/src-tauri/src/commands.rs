@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Serialize;
 use tauri::async_runtime::spawn_blocking;
-use tonic::transport::Channel;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use zeroize::Zeroizing;
 
 use signer_holder::{
@@ -129,21 +129,101 @@ where
         .map_err(|error| format!("后台任务失败: {error}"))?
 }
 
-async fn connect(server_url: &str) -> Result<SignerServiceClient<Channel>, String> {
-    let target = if server_url.contains("://") {
-        server_url.to_string()
-    } else {
-        format!("http://{server_url}")
-    };
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TlsSettings {
+    pub ca_cert_path: String,
+    pub client_cert_path: String,
+    pub client_key_path: String,
+    pub domain: Option<String>,
+}
 
-    SignerServiceClient::connect(target)
+impl TlsSettings {
+    fn validate(&self) -> Result<(), String> {
+        if self.ca_cert_path.trim().is_empty()
+            || self.client_cert_path.trim().is_empty()
+            || self.client_key_path.trim().is_empty()
+        {
+            return Err("mTLS 需要同时填写 CA 证书、客户端证书和客户端私钥".to_string());
+        }
+        if self
+            .domain
+            .as_deref()
+            .is_some_and(|domain| domain.trim().is_empty())
+        {
+            return Err("TLS domain 不能为空；不需要时请留空".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn target_url(server_url: &str, tls_enabled: bool) -> Result<String, String> {
+    if tls_enabled {
+        if server_url.contains("://") {
+            if server_url.starts_with("https://") {
+                Ok(server_url.to_string())
+            } else {
+                Err("启用 mTLS 时 gRPC 地址必须使用 https://".to_string())
+            }
+        } else {
+            Ok(format!("https://{server_url}"))
+        }
+    } else if server_url.starts_with("https://") {
+        Err("https:// 地址需要先配置 mTLS 证书".to_string())
+    } else if let Some((scheme, _)) = server_url.split_once("://") {
+        if scheme == "http" {
+            Ok(server_url.to_string())
+        } else {
+            Err("gRPC 地址必须使用 http:// 或 https://".to_string())
+        }
+    } else {
+        Ok(format!("http://{server_url}"))
+    }
+}
+
+async fn connect(
+    server_url: &str,
+    tls: Option<&TlsSettings>,
+) -> Result<SignerServiceClient<Channel>, String> {
+    let target = target_url(server_url, tls.is_some())?;
+    let mut endpoint =
+        Channel::from_shared(target).map_err(|error| format!("invalid server URL: {error}"))?;
+
+    if let Some(tls) = tls {
+        tls.validate()?;
+        let ca = std::fs::read(&tls.ca_cert_path)
+            .map_err(|error| format!("读取 CA 证书失败: {error}"))?;
+        let cert = std::fs::read(&tls.client_cert_path)
+            .map_err(|error| format!("读取客户端证书失败: {error}"))?;
+        let key = Zeroizing::new(
+            std::fs::read(&tls.client_key_path)
+                .map_err(|error| format!("读取客户端私钥失败: {error}"))?,
+        );
+
+        let mut config = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(ca))
+            .identity(Identity::from_pem(cert, key.as_slice()));
+        if let Some(domain) = &tls.domain {
+            config = config.domain_name(domain.trim());
+        }
+        endpoint = endpoint
+            .tls_config(config)
+            .map_err(|error| format!("配置 mTLS 失败: {error}"))?;
+    }
+
+    let channel = endpoint
+        .connect()
         .await
-        .map_err(|error| format!("failed to connect to signer: {error}"))
+        .map_err(|error| format!("failed to connect to signer: {error}"))?;
+    Ok(SignerServiceClient::new(channel))
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn start_unseal(server_url: String) -> Result<SessionView, String> {
-    let mut client = connect(&server_url).await?;
+pub async fn start_unseal(
+    server_url: String,
+    tls: Option<TlsSettings>,
+) -> Result<SessionView, String> {
+    let mut client = connect(&server_url, tls.as_ref()).await?;
     let response = client
         .start_unseal(pb::StartUnsealRequest {})
         .await
@@ -154,8 +234,12 @@ pub async fn start_unseal(server_url: String) -> Result<SessionView, String> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn get_status(server_url: String, session_id: String) -> Result<SessionView, String> {
-    let mut client = connect(&server_url).await?;
+pub async fn get_status(
+    server_url: String,
+    session_id: String,
+    tls: Option<TlsSettings>,
+) -> Result<SessionView, String> {
+    let mut client = connect(&server_url, tls.as_ref()).await?;
     let status = client
         .get_unseal_status(pb::GetUnsealStatusRequest { session_id })
         .await
@@ -166,8 +250,8 @@ pub async fn get_status(server_url: String, session_id: String) -> Result<Sessio
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn seal(server_url: String) -> Result<bool, String> {
-    let mut client = connect(&server_url).await?;
+pub async fn seal(server_url: String, tls: Option<TlsSettings>) -> Result<bool, String> {
+    let mut client = connect(&server_url, tls.as_ref()).await?;
     let response = client
         .seal(pb::SealRequest {})
         .await
@@ -329,8 +413,9 @@ pub async fn holder_submit_from_vault(
     identity_path: String,
     vault_path: String,
     passphrase: String,
+    tls: Option<TlsSettings>,
 ) -> Result<SessionView, String> {
-    let mut client = connect(&server_url).await?;
+    let mut client = connect(&server_url, tls.as_ref()).await?;
 
     let status = client
         .get_unseal_status(pb::GetUnsealStatusRequest {
@@ -406,4 +491,41 @@ pub async fn holder_submit_from_vault(
         .into_inner();
 
     Ok(SessionView::from_status(status))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_url_requires_matching_tls_settings() {
+        assert_eq!(
+            target_url("127.0.0.1:50051", false).unwrap(),
+            "http://127.0.0.1:50051"
+        );
+        assert_eq!(
+            target_url("127.0.0.1:50051", true).unwrap(),
+            "https://127.0.0.1:50051"
+        );
+        assert!(target_url("http://127.0.0.1:50051", true).is_err());
+        assert!(target_url("https://signer.test:50051", false).is_err());
+        assert!(target_url("grpc://127.0.0.1:50051", false).is_err());
+    }
+
+    #[test]
+    fn tls_settings_require_all_paths() {
+        let mut settings = TlsSettings {
+            ca_cert_path: String::new(),
+            client_cert_path: "client.crt".to_string(),
+            client_key_path: "client.key".to_string(),
+            domain: None,
+        };
+        assert!(settings.validate().is_err());
+
+        settings.ca_cert_path = "ca.crt".to_string();
+        assert!(settings.validate().is_ok());
+
+        settings.domain = Some(" ".to_string());
+        assert!(settings.validate().is_err());
+    }
 }

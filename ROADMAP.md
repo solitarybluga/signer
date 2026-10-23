@@ -11,7 +11,7 @@
 - [x] Ristretto255 Feldman VSS 分片、逐份校验与 KEK 校验
 - [x] 解封会话、份额收集与 KEK 恢复（核心）
 - [x] 持有者 Ed25519 签名、会话 nonce 绑定、每会话 X25519 份额加密与 VSS 校验
-- [ ] gRPC TLS/mTLS 与服务端认证
+- [x] gRPC mTLS + 客户端证书权限位（见 [docs/mtls.md](docs/mtls.md)）
 - [x] 通过 gRPC 接入解封流程（`StartUnseal` / `SubmitUnsealShare` / `GetUnsealStatus` / `Seal`）
 - [x] EdDSA/ECDSA gRPC 接口：`CreateKey`、`GetPublicKey`、`ListKeys`、`Sign`
 - [ ] `ImportKey`
@@ -22,7 +22,7 @@
 ## v0.2 — 生产化加固
 
 - [x] PostgreSQL 存储后端
-- [ ] signer 与份额持有者之间的 mTLS
+- [x] signer 与份额持有者之间的 mTLS
 - [ ] 份额轮换与重新分发
 - [ ] 按密钥粒度的鉴权与限流
 - [ ] 监控指标与链路追踪

@@ -14,7 +14,7 @@ signer-proto = { path = "../../crates/proto" }
 signer-share = { path = "../../crates/share" }
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true
-tonic.workspace = true
+tonic = { workspace = true, features = ["tls-ring"] }
 zeroize.workspace = true
 
 [build-dependencies]

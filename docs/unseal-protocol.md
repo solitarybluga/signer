@@ -1,6 +1,6 @@
 # 解封协议
 
-> 状态：核心、gRPC 与桌面端已实现 Ristretto255 Feldman VSS、会话 nonce 绑定、持有者 Ed25519 签名，以及每会话 X25519 份额加密。服务端验签、解密、校验 VSS 后才计数；gRPC 仍无 TLS/鉴权，只适合本机或可信网络。
+> 状态：核心、gRPC 与桌面端已实现 Ristretto255 Feldman VSS、会话 nonce 绑定、持有者 Ed25519 签名、每会话 X25519 份额加密，以及 mTLS + 证书权限位。服务端验签、解密、校验 VSS 后才计数；未配置 `[tls]` 时仍是明文，只适合本机或可信网络。
 >
 > VSS 实现说明见 [vss-unseal.md](vss-unseal.md)，决策见 [ADR-0007](adr/0007-vss-feldman-ristretto255.md)。
 
@@ -91,12 +91,13 @@ sequenceDiagram
 - 提交上下文绑定 `session_id`、`nonce`、`session_public_key`、holder id 和 index；AEAD AAD 与 Ed25519 签名都覆盖该上下文，密文不能跨会话或跨持有者重放。
 - 每个会话生成独立的临时 X25519 密钥对；会话结束后私钥随会话一起擦除，历史密文不能在后续会话中解密。
 - 持有者 Ed25519 签名认证提交方，服务端在计数前完成验签、解密和 VSS 校验。
-- 当前 gRPC 没有 TLS/服务端认证：中间人仍可替换 `session_public_key` 与 `nonce` 骗取份额（无法伪造最终 KEK 校验），因此只能部署在本机或可信网络，接入 mTLS 前不得跨不可信网络使用。
+- 未启用 `[tls]` 时 gRPC 没有 TLS/服务端认证：中间人仍可替换 `session_public_key` 与 `nonce` 骗取份额（无法伪造最终 KEK 校验）。启用 mTLS 后可以认证服务端；未启用时只能部署在本机或可信网络。
 - 解封不持久化 KEK；KEK 只在 unsealed 期间驻留内存，进程退出或重新 sealed 时立即擦除。磁盘上不存在可被攻击者翻转的 sealed/unsealed 标志。
 
 ## 待决问题
 
 - [ ] 解包后的 DEK / 私钥是否缓存，何时擦除？
 - [ ] 份额持有者身份如何轮换，轮换时如何重新分发份额？
-- [ ] 是否为 gRPC 接入 mTLS 与服务端公钥固定？
+- [x] gRPC 已接入 mTLS 与客户端证书权限位。
+- [ ] 是否还需要服务端公钥固定（SPKI pinning）作为额外防线？
 - [ ] 后续版本是否支持通过 KMS 自动解封？

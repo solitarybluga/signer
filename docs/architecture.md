@@ -1,6 +1,6 @@
 # 架构
 
-> 状态：草稿——反映 v0.1 设计。存储、解封、Ed25519/secp256k1 keystore 和 CreateKey/Sign 审计已实现；ImportKey、其余操作审计与 mTLS 仍在开发中。
+> 状态：草稿——反映 v0.1 设计。存储、解封、Ed25519/secp256k1 keystore、CreateKey/Sign 审计和 mTLS + 客户端证书权限位已实现；ImportKey 与其余操作审计仍在开发中。
 
 ## 目标
 
@@ -105,10 +105,11 @@ sequenceDiagram
 ## 相关文档
 
 - [密码学设计](cryptography.md)：各密码学原语的原理、参数与使用位置
+- [mTLS 与客户端证书权限位](mtls.md)：传输认证、证书 SAN URI、u64 权限位与运维边界
 
 ## 待决问题
 
 - [ ] 解包后的 DEK / 私钥是否缓存，缓存多久？
-- [ ] 份额持有者是否从第一天就启用 mTLS？
+- [x] 份额持有者从第一天就启用 mTLS；客户端证书携带 principal/holder 和 u64 权限位（ADR-0008，已实现）。
 - [ ] 审计日志放在同一数据库，还是外部只追加存储？
 - [ ] 份额轮换期间是否需要只读模式？

@@ -62,7 +62,26 @@ format = "text"
 location = true
 ```
 
-`SIGNER_TLS_CERT` / `SIGNER_TLS_KEY` 尚未接入。`signer.toml` 可能包含数据库密码，建议权限设为 `0600`，不要把真实配置提交到仓库。
+### mTLS（已实现）
+
+mTLS 和客户端证书权限位的完整设计见 [mtls.md](mtls.md) 与 [ADR-0008](adr/0008-mtls-client-cert-permissions.md)。配置：
+
+| TOML 配置 | 环境变量覆盖 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `tls.cert_path` | `SIGNER_TLS_CERT` | 未设置 | 服务端证书链 PEM；设置 `[tls]` 后必填 |
+| `tls.key_path` | `SIGNER_TLS_KEY` | 未设置 | 服务端私钥 PEM；设置 `[tls]` 后必填 |
+| `tls.client_ca_path` | `SIGNER_TLS_CLIENT_CA` | 未设置 | 客户端 CA bundle；mTLS 必填 |
+| `tls.principal_uri_prefix` | — | `signer://principal/` | 证书 principal SAN URI 前缀 |
+| `tls.holder_uri_prefix` | — | `signer://holder/` | 证书 holder SAN URI 前缀 |
+| `tls.permission_uri_prefix` | — | `signer://permissions/` | u64 权限位掩码 SAN URI 前缀 |
+
+- 三个证书路径必须同时配置；`SIGNER_TLS_*` 三件套也必须同时出现。
+- `[tls]` 缺失时保持明文模式，启动日志会 warn；生产必须显式启用。
+- 客户端证书携带 `principal`、可选 `holder` 和 u64 权限位掩码；没有本地授权策略文件，也没有热加载。
+- 未配置 `[tls]` 时保持明文模式，启动日志会 warn；生产必须显式启用。
+- 镜像支持 TLS/mTLS，但默认关闭；启用后证书应以只读方式挂载，并确保容器运行用户可读。
+
+`signer.toml` 可能包含数据库密码，建议权限设为 `0600`，不要把真实配置提交到仓库。
 
 ## 本地 PostgreSQL
 
@@ -142,7 +161,7 @@ docker compose --profile server logs -f signer
 - 容器内服务监听 `0.0.0.0:50051`；宿主机只映射到 `127.0.0.1`，不要直接暴露到公网。
 - 使用 bind mount 时，宿主机 `data/` 需要允许 UID 10001 读取；SQLite 模式还需要写权限。
 - `docker run --rm` 不会保留容器内未挂载的数据；生产环境应使用持久卷。
-- 当前镜像没有 TLS/mTLS，部署前应放在可信网络或反向代理后面。
+- 镜像默认不启用 TLS/mTLS；生产建议启用 mTLS，并把证书以只读方式挂载；配置与证书挂载方式见 [mtls.md](mtls.md)。
 
 解封阈值和份额总数由 `signer-admin init` 写入 `kek_check.json`，服务端不再从环境变量读取，避免两边配置漂移。
 
@@ -221,6 +240,21 @@ cargo run -p signer-loadtest -- \
   --ecdsa 10 \
   --concurrency 50 \
   --duration-secs 30
+```
+
+启用 mTLS 时使用 `https://`，并同时提供 CA、客户端证书和客户端私钥；压测证书需要 `unseal.start/submit/status`、`key.create/read/sign` 权限位，并在 `holder/*` 中列出所有测试 holder：
+
+```bash
+SIGNER_LOADTEST_PASSPHRASE='test-passphrase' \
+cargo run -p signer-loadtest -- \
+  --server https://127.0.0.1:50051 \
+  --ca-cert data/tls/ca.crt \
+  --client-cert data/tls/loadtest.crt \
+  --client-key data/tls/loadtest.key \
+  --holder alice.key,alice.share \
+  --holder bob.key,bob.share \
+  --eddsa 10 --ecdsa 10 \
+  --concurrency 50 --duration-secs 30
 ```
 
 服务已解封时可以跳过解封：

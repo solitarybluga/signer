@@ -7,8 +7,18 @@
 *.db-shm
 *.db-wal
 *.key
+*.pem
+*.crt
+*.csr
 *.share
 *.vault
 .env
 /signer.toml
 /CLAUDE.md
+
+# Test-only mTLS fixtures (no CA private keys).
+!crates/server/tests/fixtures/mtls/*.pem
+!crates/server/tests/fixtures/mtls/*.key
+!crates/server/tests/fixtures/mtls/*.der
+/crates/server/tests/fixtures/mtls/ca.key
+/crates/server/tests/fixtures/mtls/rogue-ca.key

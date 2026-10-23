@@ -16,5 +16,5 @@ signer-holder = { path = "../holder" }
 signer-proto = { path = "../proto" }
 signer-share = { path = "../share" }
 tokio.workspace = true
-tonic.workspace = true
+tonic = { workspace = true, features = ["tls-ring"] }
 zeroize.workspace = true

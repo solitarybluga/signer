@@ -14,6 +14,9 @@ use time::Duration;
 const DEFAULT_GRPC_ADDR: &str = "127.0.0.1:50051";
 const DEFAULT_DATA_DIR: &str = "data";
 const DEFAULT_SESSION_TTL_SECS: u64 = 600;
+pub const DEFAULT_PRINCIPAL_URI_PREFIX: &str = "signer://principal/";
+pub const DEFAULT_HOLDER_URI_PREFIX: &str = "signer://holder/";
+pub const DEFAULT_PERMISSION_URI_PREFIX: &str = "signer://permissions/";
 
 /// Server configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -23,6 +26,83 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub logging: LoggingConfig,
     pub audit: AuditConfig,
+    /// When present, gRPC requires mTLS. Absent means plaintext development mode.
+    pub tls: Option<TlsConfig>,
+}
+
+/// mTLS configuration. Presence enables TLS and client-certificate permission checks.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub client_ca_path: PathBuf,
+    #[serde(default = "default_principal_uri_prefix")]
+    pub principal_uri_prefix: String,
+    #[serde(default = "default_holder_uri_prefix")]
+    pub holder_uri_prefix: String,
+    #[serde(default = "default_permission_uri_prefix")]
+    pub permission_uri_prefix: String,
+}
+
+impl TlsConfig {
+    fn from_env_paths(cert_path: PathBuf, key_path: PathBuf, client_ca_path: PathBuf) -> Self {
+        Self {
+            cert_path,
+            key_path,
+            client_ca_path,
+            principal_uri_prefix: DEFAULT_PRINCIPAL_URI_PREFIX.to_string(),
+            holder_uri_prefix: DEFAULT_HOLDER_URI_PREFIX.to_string(),
+            permission_uri_prefix: DEFAULT_PERMISSION_URI_PREFIX.to_string(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        for path in [&self.cert_path, &self.key_path, &self.client_ca_path] {
+            if path.as_os_str().is_empty() {
+                return Err(ConfigError::InvalidTls("TLS paths must not be empty"));
+            }
+        }
+
+        let prefixes = [
+            &self.principal_uri_prefix,
+            &self.holder_uri_prefix,
+            &self.permission_uri_prefix,
+        ];
+        for prefix in prefixes {
+            if prefix.is_empty() || prefix.chars().any(char::is_control) {
+                return Err(ConfigError::InvalidTls(
+                    "TLS URI prefixes must not be empty",
+                ));
+            }
+        }
+        for (index, left) in prefixes.iter().enumerate() {
+            for right in prefixes.iter().skip(index + 1) {
+                if left == right
+                    || left.starts_with(right.as_str())
+                    || right.starts_with(left.as_str())
+                {
+                    return Err(ConfigError::InvalidTls(
+                        "TLS URI prefixes must be distinct and non-overlapping",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn default_principal_uri_prefix() -> String {
+    DEFAULT_PRINCIPAL_URI_PREFIX.to_string()
+}
+
+fn default_holder_uri_prefix() -> String {
+    DEFAULT_HOLDER_URI_PREFIX.to_string()
+}
+
+fn default_permission_uri_prefix() -> String {
+    DEFAULT_PERMISSION_URI_PREFIX.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -172,6 +252,19 @@ pub enum ConfigError {
     #[error("invalid config: {0}")]
     Invalid(&'static str),
 
+    #[error("invalid TLS config: {0}")]
+    InvalidTls(&'static str),
+
+    #[error("failed to read TLS file {path}: {source}")]
+    TlsFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("TLS file is empty: {path}")]
+    TlsFileEmpty { path: PathBuf },
+
     #[error("SIGNER_SESSION_TTL_SECS must be a positive integer")]
     InvalidSessionTtl,
 
@@ -242,6 +335,9 @@ impl Config {
         self.database.pool_config(10)?;
         self.grpc_addr()?;
         self.session_ttl()?;
+        if let Some(tls) = &self.tls {
+            tls.validate()?;
+        }
         Ok(())
     }
 
@@ -259,6 +355,33 @@ impl Config {
             self.server.session_ttl_secs =
                 value.parse().map_err(|_| ConfigError::InvalidSessionTtl)?;
         }
+
+        match (
+            non_empty_env("SIGNER_TLS_CERT"),
+            non_empty_env("SIGNER_TLS_KEY"),
+            non_empty_env("SIGNER_TLS_CLIENT_CA"),
+        ) {
+            (None, None, None) => {}
+            (Some(cert), Some(key), Some(ca)) => {
+                if let Some(tls) = &mut self.tls {
+                    tls.cert_path = PathBuf::from(cert);
+                    tls.key_path = PathBuf::from(key);
+                    tls.client_ca_path = PathBuf::from(ca);
+                } else {
+                    self.tls = Some(TlsConfig::from_env_paths(
+                        PathBuf::from(cert),
+                        PathBuf::from(key),
+                        PathBuf::from(ca),
+                    ));
+                }
+            }
+            _ => {
+                return Err(ConfigError::InvalidTls(
+                    "SIGNER_TLS_CERT, SIGNER_TLS_KEY and SIGNER_TLS_CLIENT_CA must be set together",
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -289,7 +412,82 @@ mod tests {
         assert_eq!(config.server.data_dir, PathBuf::from(DEFAULT_DATA_DIR));
         assert_eq!(config.server.session_ttl_secs, DEFAULT_SESSION_TTL_SECS);
         assert!(config.audit.sign_enabled);
+        assert!(config.tls.is_none());
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn tls_config_parses_with_default_prefixes() {
+        let config: Config = toml::from_str(
+            r#"
+[tls]
+cert_path = "data/tls/server.crt"
+key_path = "data/tls/server.key"
+client_ca_path = "data/tls/ca.crt"
+"#,
+        )
+        .unwrap();
+
+        let tls = config.tls.as_ref().expect("tls section parsed");
+        assert_eq!(tls.principal_uri_prefix, DEFAULT_PRINCIPAL_URI_PREFIX);
+        assert_eq!(tls.holder_uri_prefix, DEFAULT_HOLDER_URI_PREFIX);
+        assert_eq!(tls.permission_uri_prefix, DEFAULT_PERMISSION_URI_PREFIX);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn tls_config_accepts_custom_prefixes() {
+        let config: Config = toml::from_str(
+            r#"
+[tls]
+cert_path = "server.crt"
+key_path = "server.key"
+client_ca_path = "ca.crt"
+principal_uri_prefix = "acme://principal/"
+holder_uri_prefix = "acme://holder/"
+permission_uri_prefix = "acme://permissions/"
+"#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+        let tls = config.tls.unwrap();
+        assert_eq!(tls.principal_uri_prefix, "acme://principal/");
+    }
+
+    #[test]
+    fn tls_config_rejects_missing_fields_and_overlapping_prefixes() {
+        let missing: Result<Config, _> = toml::from_str(
+            r#"
+[tls]
+cert_path = "server.crt"
+key_path = "server.key"
+"#,
+        );
+        assert!(missing.is_err());
+
+        let config: Config = toml::from_str(
+            r#"
+[tls]
+cert_path = "server.crt"
+key_path = "server.key"
+client_ca_path = "ca.crt"
+holder_uri_prefix = "signer://principal/holder/"
+"#,
+        )
+        .unwrap();
+        assert!(config.validate().is_err());
+
+        let unknown: Result<Config, _> = toml::from_str(
+            r#"
+[tls]
+cert_path = "server.crt"
+key_path = "server.key"
+client_ca_path = "ca.crt"
+unknown = true
+"#,
+        );
+        assert!(unknown.is_err());
     }
 
     #[test]

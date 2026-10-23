@@ -15,10 +15,41 @@
           <p>门限解封控制台</p>
         </div>
       </div>
-      <label class="server-field">
-        <span>gRPC 地址</span>
-        <input id="server" value="http://127.0.0.1:50051" spellcheck="false" />
-      </label>
+      <div class="connection-settings">
+        <label class="server-field">
+          <span>gRPC 地址</span>
+          <input id="server" value="http://127.0.0.1:50051" spellcheck="false" />
+        </label>
+        <details class="mtls-settings">
+          <summary>mTLS 证书（可选）</summary>
+          <p class="note">启用后地址必须使用 https://，并同时选择三项证书文件。</p>
+          <label class="field">
+            <span>CA 证书</span>
+            <div class="picker">
+              <input id="tls-ca" readonly placeholder="选择 CA 证书 (.crt/.pem)" />
+              <button id="pick-tls-ca" class="ghost" type="button">选择…</button>
+            </div>
+          </label>
+          <label class="field">
+            <span>客户端证书</span>
+            <div class="picker">
+              <input id="tls-client-cert" readonly placeholder="选择客户端证书" />
+              <button id="pick-tls-client-cert" class="ghost" type="button">选择…</button>
+            </div>
+          </label>
+          <label class="field">
+            <span>客户端私钥</span>
+            <div class="picker">
+              <input id="tls-client-key" readonly placeholder="选择客户端私钥" />
+              <button id="pick-tls-client-key" class="ghost" type="button">选择…</button>
+            </div>
+          </label>
+          <label class="field">
+            <span>TLS domain（可选）</span>
+            <input id="tls-domain" placeholder="证书 SAN 与连接地址不一致时填写" spellcheck="false" />
+          </label>
+        </details>
+      </div>
     </header>
 
     <nav class="tabs" role="tablist" aria-label="功能切换">

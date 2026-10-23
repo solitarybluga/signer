@@ -157,10 +157,38 @@ h1 {
   font-size: 13px;
 }
 
+.connection-settings {
+  display: grid;
+  gap: 10px;
+  min-width: 320px;
+}
+
 .server-field {
   display: grid;
   gap: 6px;
   min-width: 300px;
+}
+
+.mtls-settings {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-soft);
+}
+
+.mtls-settings summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mtls-settings .note {
+  margin-top: 8px;
+}
+
+.mtls-settings .field {
+  margin-top: 8px;
+  margin-bottom: 0;
 }
 
 .server-field span,

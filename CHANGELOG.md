@@ -23,6 +23,10 @@
 - Holder 导入时用 manifest 中的 VSS 承诺校验份额；vault v2 记录 `vss_verified` 和 scheme。
 - `SubmitUnsealShare` 增加 `share_index` 字段；桌面端从 vault 提交时显式携带索引。
 - 新增 ADR-0007：使用 Ristretto255 Feldman VSS。
+- 新增 ADR-0008：mTLS + 客户端证书权限位掩码；新增 `docs/mtls.md` 设计与运维文档。
+- 实现 gRPC mTLS：服务端 `[tls]` 配置、客户端证书 principal/holder/u64 权限位解析、逐 RPC 权限检查、holder 绑定，以及 CreateKey/Sign 的证书 actor 审计。
+- `signer-loadtest` 与 Tauri 桌面端接入 mTLS；新增 `scripts/gen-mtls.sh` / `gen-mtls.ps1` 和静态测试证书。
+- `signer.example.toml` 增加 `[tls]` 配置示例；默认仍为明文本地开发模式。
 - 将解封接口接入 gRPC（StartUnseal / SubmitUnsealShare / GetUnsealStatus / Seal），新增服务启动流程与数据目录初始化。
 - 新增 Tauri 桌面解封客户端（`desktop/`）：发起会话、提交份额、进度展示与重新封存。
 - 新增 `signer-admin`：X25519 持有者密钥生成、KEK 初始化、加密份额导出。

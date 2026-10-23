@@ -1,11 +1,14 @@
 mod config;
 mod grpc;
+mod permissions;
+mod tls;
 
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use tonic::service::InterceptorLayer;
 use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -100,13 +103,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = config.grpc_addr()?;
     info!(%addr, "signer gRPC listening");
 
-    Server::builder()
-        .add_service(
-            SignerGrpc::with_sign_audit(Arc::new(manager), store, config.audit.sign_enabled)
-                .into_server(),
-        )
-        .serve(addr)
-        .await?;
+    let signer = SignerGrpc::with_sign_audit(Arc::new(manager), store, config.audit.sign_enabled)
+        .with_client_permissions(config.tls.is_some());
+
+    if let Some(tls) = &config.tls {
+        let interceptor = tls::ClientCertInterceptor::new(tls);
+        info!(
+            cert = %tls.cert_path.display(),
+            client_ca = %tls.client_ca_path.display(),
+            principal_uri_prefix = %tls.principal_uri_prefix,
+            holder_uri_prefix = %tls.holder_uri_prefix,
+            permission_uri_prefix = %tls.permission_uri_prefix,
+            "gRPC mTLS enabled"
+        );
+        Server::builder()
+            .tls_config(tls::server_tls_config(tls)?)?
+            .layer(InterceptorLayer::new(interceptor))
+            .add_service(signer.into_server())
+            .serve(addr)
+            .await?;
+    } else {
+        tracing::warn!(
+            "gRPC TLS is disabled; plaintext is only safe on loopback or a trusted network"
+        );
+        Server::builder()
+            .add_service(signer.into_server())
+            .serve(addr)
+            .await?;
+    }
 
     Ok(())
 }
